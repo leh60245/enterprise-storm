@@ -1236,3 +1236,218 @@ class AzureAISearch(dspy.Retrieve):
                 logging.error(f"Error occurs when searching query {query}: {e}")
 
         return collected_results
+
+
+class PostgresRM(dspy.Retrieve):
+    """
+    PostgreSQL 벡터 검색 기반 Retrieval Model for STORM
+
+    내부 PostgreSQL DB(Source_Materials 테이블)에서 pgvector를 활용하여
+    벡터 유사도 검색을 수행합니다. DART 보고서 데이터를 우선 검색합니다.
+
+    DEV_GUIDELINES.md의 "Internal Data First" 철학을 따릅니다.
+
+    Attributes:
+        connector: PostgresConnector 인스턴스
+        k: 검색할 최대 결과 수
+        min_score: 최소 유사도 임계값 (이 값보다 낮으면 경고 로그)
+        usage: 검색 호출 횟수 추적
+
+    Example:
+        >>> rm = PostgresRM(k=5, min_score=0.5)
+        >>> result = rm.forward("삼성전자 재무 현황")
+        >>> print(result.passages)
+    """
+
+    def __init__(self, k: int = 5, min_score: float = 0.5):
+        """
+        PostgresRM 초기화
+
+        Args:
+            k: 검색할 최대 결과 수 (기본값: 5)
+            min_score: 최소 유사도 임계값 (기본값: 0.5)
+                       검색 결과의 score가 이 값보다 낮으면 경고 로그를 남김
+                       (추후 외부 검색 연동을 위한 포석)
+
+        Raises:
+            RuntimeError: PostgresConnector 초기화 실패 시
+        """
+        super().__init__(k=k)
+
+        from .db import PostgresConnector
+
+        self.connector = PostgresConnector()
+        self.min_score = min_score
+        self.usage = 0
+
+        logging.info(f"PostgresRM initialized with k={k}, min_score={min_score}")
+
+    def get_usage_and_reset(self):
+        """
+        사용량 조회 및 리셋
+
+        Returns:
+            dict: {"PostgresRM": usage_count}
+        """
+        usage = self.usage
+        self.usage = 0
+        return {"PostgresRM": usage}
+
+    def forward(
+        self,
+        query_or_queries: Union[str, List[str]],
+        exclude_urls: List[str] = [],
+        k: int = None
+    ):
+        """
+        STORM 엔진에서 호출하는 검색 메서드
+
+        Args:
+            query_or_queries: 검색 쿼리 (단일 문자열 또는 문자열 리스트)
+            exclude_urls: 제외할 URL 리스트 (STORM 인터페이스 호환용, 현재 미사용)
+            k: 검색 결과 수 (None이면 self.k 사용)
+
+        Returns:
+            dspy.Prediction: passages 필드에 검색 결과 리스트 포함
+                - 각 결과는 {'content', 'title', 'url', 'score'} 형태
+
+        Note:
+            검색 결과의 score가 min_score보다 낮으면 경고 로그를 남깁니다.
+            이는 추후 하이브리드 검색(외부 검색 Fallback) 구현을 위한 준비입니다.
+        """
+        # 검색 개수 결정
+        search_k = k if k is not None else self.k
+
+        # 단일 쿼리를 리스트로 변환
+        queries = (
+            [query_or_queries]
+            if isinstance(query_or_queries, str)
+            else query_or_queries
+        )
+
+        self.usage += len(queries)
+        collected_results = []
+        low_score_count = 0
+
+        for query in queries:
+            try:
+                # PostgresConnector를 통한 벡터 검색
+                results = self.connector.search(query, top_k=search_k)
+
+                for result in results:
+                    # 최소 점수 체크 (하이브리드 검색 로직 준비)
+                    if result.get('score', 0) < self.min_score:
+                        low_score_count += 1
+
+                    # STORM 호환 포맷으로 변환
+                    # 기존 RM들은 'snippets' 필드를 사용하므로 호환성 추가
+                    # collected_results.append({
+                    #     "content": result.get("content", ""),
+                    #     "snippets": [result.get("content", "")],  # STORM 호환
+                    #     "title": result.get("title", ""),
+                    #     "url": result.get("url", ""),
+                    #     "description": result.get("title", ""),  # STORM 호환
+                    #     "score": result.get("score", 0.0)
+                    # })
+
+                    entry = {
+                        "content": result.get("content", ""),
+                        "snippets": [result.get("content", "")],  # STORM 필수
+                        "title": result.get("title", "No Title"),
+                        "url": result.get("url", "local_db"),
+                        "description": result.get("title", ""),
+                        "score": result.get("score", 0.0)
+                    }
+
+                    collected_results.append(dspy.Prediction(**entry))
+
+            except Exception as e:
+                logging.error(f"Error occurs when searching query '{query}': {e}")
+
+        # 낮은 점수 결과에 대한 경고 로그
+        if low_score_count > 0:
+            logging.warning(
+                f"PostgresRM: {low_score_count}/{len(collected_results)} results "
+                f"have score below min_score threshold ({self.min_score}). "
+                f"Consider using external search as fallback."
+            )
+
+        logging.info(f"PostgresRM: Found {len(collected_results)} results for {len(queries)} queries")
+
+        # return dspy.Prediction(passages=collected_results)
+        return collected_results
+
+    def close(self):
+        """PostgresConnector 연결 종료"""
+        if self.connector:
+            self.connector.close()
+
+
+# PostgresRM 테스트 코드
+if __name__ == "__main__":
+    import sys
+    import toml
+
+    def load_api_key(toml_file_path):
+        """secrets.toml에서 환경변수 로드"""
+        try:
+            with open(toml_file_path, "r") as file:
+                data = toml.load(file)
+            for key, value in data.items():
+                os.environ[key] = str(value)
+        except FileNotFoundError:
+            print(f"File not found: {toml_file_path}", file=sys.stderr)
+        except toml.TomlDecodeError:
+            print(f"Error decoding TOML file: {toml_file_path}", file=sys.stderr)
+
+    # secrets.toml 로드
+    secrets_path = "secrets.toml"
+    if os.path.exists(secrets_path):
+        load_api_key(secrets_path)
+        print(f"✓ Loaded secrets from: {secrets_path}")
+    else:
+        print(f"⚠ secrets.toml not found")
+        print("  Please create secrets.toml with PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DATABASE")
+        sys.exit(1)
+
+    try:
+        # PostgresRM 초기화
+        print("\n[1] Initializing PostgresRM...")
+        rm = PostgresRM(k=5, min_score=0.5)
+        print("✓ PostgresRM initialized successfully")
+
+        # 단일 쿼리 테스트
+        print("\n[2] Testing single query: '삼성전자 재무'")
+        result = rm.forward("삼성전자 재무")
+
+        print(f"✓ Result type: {type(result)}")
+        print(f"✓ Result is dspy.Prediction: {isinstance(result, dspy.Prediction)}")
+        print(f"✓ Number of passages: {len(result.passages)}")
+
+        if result.passages:
+            print("\n--- First passage ---")
+            first = result.passages[0]
+            print(f"  Title: {first.get('title', 'N/A')}")
+            print(f"  URL: {first.get('url', 'N/A')}")
+            print(f"  Score: {first.get('score', 'N/A')}")
+            print(f"  Content (first 150 chars): {first.get('content', '')[:150]}...")
+
+        # 다중 쿼리 테스트
+        print("\n[3] Testing multiple queries...")
+        result2 = rm.forward(["삼성전자 매출", "삼성전자 영업이익"])
+        print(f"✓ Multiple queries result: {len(result2.passages)} passages")
+
+        # 사용량 확인
+        usage = rm.get_usage_and_reset()
+        print(f"\n[4] Usage stats: {usage}")
+
+        # 연결 종료
+        rm.close()
+        print("\n[5] PostgresRM test completed successfully ✓")
+
+    except Exception as e:
+        print(f"✗ Error: {e}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
