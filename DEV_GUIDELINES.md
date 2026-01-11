@@ -24,20 +24,34 @@
 | :--- | :--- | :--- |
 | `id` | Integer (PK) | 고유 식별자 |
 | `report_id` | Integer (FK) | 보고서 ID (`Analysis_Reports` 테이블 참조) |
-| `chunk_type` | VARCHAR | `'text'` 또는 `'table'` (데이터 처리 분기점) |
+| `chunk_type` | VARCHAR | `'text'`, `'table'`, `'noise_merged'` (데이터 처리 분기점) |
 | `section_path` | TEXT | 문서 내 경로 (예: "II. 사업의 내용 > 1. 개요") |
 | `sequence_order` | INTEGER | 문서 내 등장 순서 (문맥 파악용) |
 | `raw_content` | TEXT | 본문 텍스트 또는 Markdown 변환된 표 |
 | `embedding` | vector(768) | `ko-sbert` 기반 임베딩 벡터 |
+| `metadata` | JSONB | 메타데이터 (예: `{"has_merged_meta": false, "is_noise_dropped": true, "length": 160}`) |
+
+#### `metadata` JSON 필드 구조:
+- `has_merged_meta` (boolean): 병합된 메타 정보(단위, 범례 등) 포함 여부 (기본값: false)
+- `is_noise_dropped` (boolean): 노이즈로 판단되어 검색 제외된 청크 (chunk_type='noise_merged'일 때만 존재)
+- `has_embedding` (boolean): 임베딩 벡터 생성 여부
+- `context_injected` (boolean): 문맥 주입 여부
+- `length` (integer): 청크 길이
+
+> **Note (2026-01-10 업데이트):** DB 파트의 선행 작업으로 '단위 표', '별첨' 등 노이즈 청크는 Vector DB에 임베딩되지 않고(`chunk_type='noise_merged'`), 직전 텍스트 청크에 병합되어 `metadata.has_merged_meta: true`로 표시됩니다.
 
 ## 4. 핵심 개발 규칙 (Development Rules)
 
 ### 4.1. 검색 로직 (Retrieval Logic)
-* **Connector 분리:** DB 연결 로직은 `knowledge_storm/utils/postgres_connector.py`에 독립적으로 구현한다.
-* **표(Table) 처리 알고리즘:**
+* **Connector 분리:** DB 연결 로직은 `knowledge_storm/db/postgres_connector.py`에 독립적으로 구현한다.
+* **Noise 필터링:** `chunk_type = 'noise_merged'`인 청크는 검색 결과에 포함되지 않도록 WHERE 절로 필터링. `metadata.is_noise_dropped = true`인 행이 검색 결과에 나타나면 즉시 리포트할 것.
+* **표(Table) 처리 알고리즘 - Sliding Window Retrieval:**
     * `chunk_type = 'table'`인 데이터를 조회할 경우, 단독으로 사용하지 않는다.
-    * **Context Look-back:** 반드시 `sequence_order`를 확인하여 **직전 텍스트(Sequence - 1)**의 내용을 `raw_content` 앞에 덧붙여서 LLM에게 제공해야 한다. (단위, 기준일자 누락 방지)
-    * LLM 제공 포맷: `[문맥: ...직전 텍스트...] \n [표 데이터] \n ...표 내용...`
+    * **Sliding Window Context:** `sequence_order ± 1`을 확인하여 **앞뒤 인접 청크**를 함께 가져와 하나의 Context Block으로 구성한다.
+    * LLM 제공 포맷: `[이전 문맥]\n{prev_text}\n\n[표 데이터]\n{table_content}\n\n[이후 문맥]\n{next_text}`
+* **Merged Meta 활용:**
+    * `metadata.has_merged_meta = true`인 청크에는 문단 끝에 병합된 메타 정보(단위, 범례, 기준일자 등)가 포함됨.
+    * LLM에게 이를 인지시키는 안내 문구가 자동으로 추가됨: `[참고: 이 문단 끝에 병합된 메타 정보가 포함되어 있습니다...]`
 
 ### 4.2. STORM 연동 규격
 * 커스텀 검색 모듈(`PostgresRM`)은 STORM의 `dspy.Retrieve` 인터페이스를 준수해야 한다.

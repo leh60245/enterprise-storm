@@ -1167,53 +1167,58 @@ class GoogleModel(dspy.dsp.modules.lm.LM):
     ):
         """You can use `genai.list_models()` to get a list of available models."""
         super().__init__(model)
-        try:
-            import google.generativeai as genai
-        except ImportError as err:
-            raise ImportError(
-                "GoogleModel requires `pip install google-generativeai`."
-            ) from err
+        from google import genai
+        from google.genai import types
 
         api_key = os.environ.get("GOOGLE_API_KEY") if api_key is None else api_key
-        genai.configure(api_key=api_key)
-
-        kwargs = {
-            "candidate_count": 1,  # Caveat: Gemini API supports only one candidate for now.
-            "temperature": (
-                0.0 if "temperature" not in kwargs else kwargs["temperature"]
-            ),
-            "max_output_tokens": kwargs["max_tokens"],
-            "top_p": 1,
-            "top_k": 1,
-            **kwargs,
-        }
-
-        kwargs.pop("max_tokens", None)  # GenerationConfig cannot accept max_tokens
-
+        self.client = genai.Client(api_key=api_key)
         self.model = model
-        self.config = genai.GenerationConfig(**kwargs)
-        self.llm = genai.GenerativeModel(
-            model_name=model, generation_config=self.config
-        )
 
-        self.kwargs = {
-            "n": 1,
-            **kwargs,
+        # 기본 설정 값
+        self.default_config_args = {
+            "candidate_count": 1,  # Caveat: Gemini API supports only one candidate for now.
+            "temperature": kwargs.get("temperature", 0.0),
+            "max_output_tokens": kwargs.pop("max_tokens", None),  # GenerationConfig cannot accept max_tokens
+            "top_p": kwargs.get("top_p", 1),
+            "top_k": kwargs.get("top_k", 1)
         }
+        # kwargs에 남은 설정들 병합
+        self.default_config_args.update(kwargs)
+
+        # 안전 설정 완화 (기업 분석 데이터 등 안전한 데이터용)
+        # 새로운 SDK에서는 types.SafetySetting을 사용합니다.
+        self.safety_settings = [
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE
+            ),
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE
+            ),
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE
+            ),
+            types.SafetySetting(
+                category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                threshold=types.HarmBlockThreshold.BLOCK_NONE
+            ),
+        ]
 
         self.history: list[dict[str, Any]] = []
-
         self._token_usage_lock = threading.Lock()
         self.prompt_tokens = 0
         self.completion_tokens = 0
 
     def log_usage(self, response):
         """Log the total tokens from the Google API response."""
+        # 새로운 SDK의 response.usage_metadata 구조에 맞춰 접근
         usage_data = response.usage_metadata
         if usage_data:
             with self._token_usage_lock:
-                self.prompt_tokens += usage_data.prompt_token_count
-                self.completion_tokens += usage_data.candidates_token_count
+                self.prompt_tokens += (usage_data.prompt_token_count or 0)
+                self.completion_tokens += (usage_data.candidates_token_count or 0)
 
     def get_usage_and_reset(self):
         """Get the total tokens used and reset the token usage."""
@@ -1229,22 +1234,67 @@ class GoogleModel(dspy.dsp.modules.lm.LM):
         return usage
 
     def basic_request(self, prompt: str, **kwargs):
-        raw_kwargs = kwargs
-        kwargs = {
-            **self.kwargs,
-            **kwargs,
-        }
+        from google.genai import types
 
-        # Google disallows "n" arguments.
-        n = kwargs.pop("n", None)
+        # 요청별 설정 병합
+        config_args = self.default_config_args.copy()
 
-        response = self.llm.generate_content(prompt, generation_config=kwargs)
+        # dspy에서 넘어오는 max_tokens 처리
+        if "max_tokens" in kwargs:
+            config_args["max_output_tokens"] = kwargs.pop("max_tokens")
+
+        # Google API는 n 파라미터를 지원하지 않음 (loop 처리 필요)
+        kwargs.pop("n", None)
+
+        # 나머지 kwargs 업데이트
+        config_args.update(kwargs)
+
+        # 안전 설정이 초기화되지 않았을 경우를 대비한 방어 코드 (AttributeError 방지)
+        if not hasattr(self, 'safety_settings'):
+            self.safety_settings = [
+                types.SafetySetting(
+                    category=types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                ),
+                types.SafetySetting(
+                    category=types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                ),
+                types.SafetySetting(
+                    category=types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                ),
+                types.SafetySetting(
+                    category=types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+                    threshold=types.HarmBlockThreshold.BLOCK_NONE
+                ),
+            ]
+
+        # GenerateContentConfig 생성
+        config = types.GenerateContentConfig(
+            safety_settings=self.safety_settings,
+            **config_args
+        )
+
+        # 실제 API 호출
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config=config
+        )
+
+        # [수정됨] history에는 JSON 직렬화가 가능한 딕셔너리 형태로 저장
+        try:
+            # Pydantic v2 방식 (권장)
+            response_data = response.model_dump(mode='json')
+        except AttributeError:
+            # 구버전 호환 또는 실패 시 문자열로 저장
+            response_data = str(response)
 
         history = {
             "prompt": prompt,
-            "response": [response.to_dict()],
-            "kwargs": kwargs,
-            "raw_kwargs": raw_kwargs,
+            "response": [response_data],
+            "kwargs": config_args,
         }
         self.history.append(history)
 
@@ -1253,21 +1303,23 @@ class GoogleModel(dspy.dsp.modules.lm.LM):
     @backoff.on_exception(
         backoff.expo,
         (Exception,),
-        max_time=1000,
-        max_tries=8,
-        on_backoff=backoff_hdlr,
-        giveup=giveup_hdlr,
+        max_time=300,
+        max_tries=5,
+        # backoff_hdlr가 정의되어 있다고 가정
+        # on_backoff=backoff_hdlr,
+        giveup=lambda e: False,
+        factor=10,
     )
     def request(self, prompt: str, **kwargs):
         """Handles retrieval of completions from Google whilst handling API errors"""
         return self.basic_request(prompt, **kwargs)
 
     def __call__(
-        self,
-        prompt: str,
-        only_completed: bool = True,
-        return_sorted: bool = False,
-        **kwargs,
+            self,
+            prompt: str,
+            only_completed: bool = True,
+            return_sorted: bool = False,
+            **kwargs,
     ):
         assert only_completed, "for now"
         assert return_sorted is False, "for now"
@@ -1276,9 +1328,22 @@ class GoogleModel(dspy.dsp.modules.lm.LM):
 
         completions = []
         for _ in range(n):
-            response = self.request(prompt, **kwargs)
-            self.log_usage(response)
-            completions.append(response.parts[0].text)
+            try:
+                response = self.request(prompt, **kwargs)
+                self.log_usage(response)
+
+                # 응답 텍스트 추출
+                if response.text:
+                    completions.append(response.text)
+                else:
+                    candidate = response.candidates[0] if response.candidates else None
+                    finish_reason = getattr(candidate, 'finish_reason', 'UNKNOWN')
+                    logging.warning(f"Gemini response empty/blocked. Finish reason: {finish_reason}")
+                    completions.append("")
+
+            except Exception as e:
+                logging.warning(f"Error executing Gemini request: {e}")
+                completions.append("")
 
         return completions
 

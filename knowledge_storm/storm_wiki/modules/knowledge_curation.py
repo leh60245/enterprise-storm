@@ -166,7 +166,12 @@ class QuestionToQuery(dspy.Signature):
 
 class AnswerQuestion(dspy.Signature):
     """You are an expert who can use information effectively. You are chatting with a Wikipedia writer who wants to write a Wikipedia page on topic you know. You have gathered the related information and will now use the information to form a response.
-    Make your response as informative as possible, ensuring that every sentence is supported by the gathered information. If the [gathered information] is not directly related to the [topic] or [question], provide the most relevant answer based on the available information. If no appropriate answer can be formulated, respond with, “I cannot answer this question based on the available information,” and explain any limitations or gaps.
+    Make your response as informative as possible, ensuring that every sentence is supported by the gathered information. If the [gathered information] is not directly related to the [topic] or [question], provide the most relevant answer based on the available information. If no appropriate answer can be formulated, respond with, "I cannot answer this question based on the available information," and explain any limitations or gaps.
+
+    Important guidelines for interpreting numerical data:
+        - When information contains tables or numerical values, ALWAYS check for meta information at the end of the paragraph (such as units: 단위, legends: 범례, base dates: 기준일자, currency).
+        - Apply these meta details correctly when interpreting and presenting numbers.
+        - If "[참고:" appears at the beginning of a passage, pay special attention to the merged metadata note that follows.
     """
 
     topic = dspy.InputField(prefix="Topic you are discussing about:", format=str)
