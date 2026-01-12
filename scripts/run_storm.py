@@ -160,6 +160,40 @@ def select_company_and_topic() -> tuple[str, str]:
     return target_company, target_topic
 
 
+def _extract_company_from_topic(topic: str, default_company: str = None) -> str:
+    """
+    토픽 문자열에서 기업명을 추출
+
+    COMPANY_ALIASES를 활용하여 토픽에서 언급된 기업명을 찾아
+    정규화된 기업명으로 반환합니다.
+
+    Args:
+        topic: 분석 토픽 (예: "삼성전자 SWOT 분석")
+        default_company: 기본 기업명 (토픽에서 찾지 못한 경우 사용)
+
+    Returns:
+        정규화된 기업명 또는 None
+
+    Example:
+        >>> _extract_company_from_topic("삼전 재무 분석")
+        "삼성전자"
+        >>> _extract_company_from_topic("SK Hynix 개요")
+        "SK하이닉스"
+    """
+    try:
+        # 로컬 import: 스크립트 실행 환경에서만 필요하며, 실패해도 기본값으로 폴백합니다.
+        from src.common.config import extract_companies_from_query  # type: ignore
+
+        companies = extract_companies_from_query(topic)
+        if companies:
+            return companies[0]
+    except Exception as e:
+        # ImportError뿐 아니라 설정/alias 로딩 문제 등도 여기서 로깅 후 폴백
+        logger.warning(f"Could not extract company from topic (fallback to default): {e}")
+
+    return default_company
+
+
 def create_topic_dir_name(topic: str) -> str:
     """
     토픽명을 파일시스템 호환 디렉토리명으로 변환
@@ -183,6 +217,74 @@ def create_topic_dir_name(topic: str) -> str:
     dir_name = dir_name.replace('/', '_').replace('\\', '_')
     dir_name = re.sub(r'[:*?"<>|]', '', dir_name)
     return dir_name
+
+
+def _safe_dir_component(name: str, fallback: str = "unknown") -> str:
+    """디렉토리 경로 컴포넌트로 안전하게 변환합니다 (Windows 금지문자 제거, 공백->언더스코어)."""
+    if not name:
+        return fallback
+    safe = name.replace(" ", "_")
+    safe = safe.replace("/", "_").replace("\\", "_")
+    safe = re.sub(r'[:*?"<>|]', "", safe)
+    safe = safe.strip(". ")
+    return safe or fallback
+
+
+def build_run_output_dir(base_output_dir: str, company_name: str, topic: str) -> str:
+    """실행별 결과 폴더를 `base/company/topic/YYYYMMDD_HHMMSS` 형태로 생성합니다."""
+    company_dir = _safe_dir_component(company_name, fallback="unknown_company")
+    # topic은 이미 파일시스템 호환 변환 로직이 있으니 재사용
+    topic_dir = create_topic_dir_name(topic)
+    topic_dir = _safe_dir_component(topic_dir, fallback="unknown_topic")
+
+    # 구분 가능한 타임스탬프 (초 단위)
+    timestamp_dir = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    run_dir = os.path.join(base_output_dir, company_dir, topic_dir, timestamp_dir)
+
+    # 같은 초에 재실행/병렬 실행 시 충돌 방지
+    suffix = 1
+    candidate = run_dir
+    while os.path.exists(candidate):
+        suffix += 1
+        candidate = f"{run_dir}_{suffix}"
+
+    os.makedirs(candidate, exist_ok=True)
+    return candidate
+
+
+def write_run_args_json(run_output_dir: str, *, topic: str, company_filter: str | None, args, model_name: str):
+    """실행 폴더에 스크립트 레벨 설정을 JSON으로 기록합니다."""
+    payload = {
+        "created_at": datetime.now().isoformat(timespec="seconds"),
+        "topic": topic,
+        "company_filter": company_filter,
+        "model_provider": getattr(args, "model_provider", None),
+        "model_name": model_name,
+        "output_dir": run_output_dir,
+        "storm_args": {
+            "max_conv_turn": getattr(args, "max_conv_turn", None),
+            "max_perspective": getattr(args, "max_perspective", None),
+            "search_top_k": getattr(args, "search_top_k", None),
+            "min_score": getattr(args, "min_score", None),
+            "max_thread_num": getattr(args, "max_thread_num", None),
+            "do_research": getattr(args, "do_research", None),
+            "do_generate_outline": getattr(args, "do_generate_outline", None),
+            "do_generate_article": getattr(args, "do_generate_article", None),
+            "do_polish_article": getattr(args, "do_polish_article", None),
+        },
+        "env": {
+            "OPENAI_API_TYPE": os.getenv("OPENAI_API_TYPE"),
+            "EMBEDDING_PROVIDER": os.getenv("EMBEDDING_PROVIDER"),
+            "PG_HOST": os.getenv("PG_HOST"),
+            "PG_PORT": os.getenv("PG_PORT"),
+            "PG_DATABASE": os.getenv("PG_DATABASE"),
+        },
+    }
+
+    path = os.path.join(run_output_dir, "run_args.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
 def save_report_to_db(topic: str, output_dir: str, secrets_path: str, model_name: str = "gpt-4o") -> bool:
@@ -474,6 +576,7 @@ def run_batch_analysis(args):
         current_model_name = "gpt-4o"
 
     # PostgresRM 초기화 (내부 DB 검색)
+    # company_filter는 각 토픽 처리 시 동적으로 설정됨
     logger.info("Initializing PostgresRM (Internal DB Search)...")
     rm = PostgresRM(k=args.search_top_k, min_score=args.min_score)
     logger.info(f"✓ PostgresRM initialized with k={args.search_top_k}, min_score={args.min_score}")
@@ -486,6 +589,10 @@ def run_batch_analysis(args):
         # 기본 분석 타겟 사용
         analysis_targets = ANALYSIS_TARGETS
 
+    # company_name이 전달된 경우 (인터랙티브 모드에서 호출)
+    # args.company_name이 있으면 그 값을 사용
+    default_company_filter = getattr(args, 'company_name', None)
+
     total_topics = len(analysis_targets)
     successful = 0
     failed = 0
@@ -495,6 +602,8 @@ def run_batch_analysis(args):
     logger.info(f"Model provider: {args.model_provider} ({current_model_name})")
     logger.info(f"Total topics to process: {total_topics}")
     logger.info(f"Output directory: {args.output_dir}")
+    if default_company_filter:
+        logger.info(f"Default company filter: {default_company_filter}")
     logger.info("=" * 60)
 
     for idx, topic in enumerate(analysis_targets, 1):
@@ -504,14 +613,19 @@ def run_batch_analysis(args):
         logger.info("-" * 50)
 
         try:
-            # 각 토픽별로 별도의 출력 디렉토리 설정
-            # 토픽명을 디렉토리명으로 변환하여 결과가 덮어씌워지지 않도록 함
-            topic_dir_name = create_topic_dir_name(topic)
-            topic_output_dir = os.path.join(args.output_dir, topic_dir_name)
+            # 토픽에서 기업명 추출하여 company_filter 설정
+            company_filter = _extract_company_from_topic(topic, default_company_filter)
+            rm.set_company_filter(company_filter)
+            if company_filter:
+                logger.info(f"📌 Company filter set to: {company_filter}")
 
-            # Engine Arguments 설정
+            # 실행별로 별도 폴더 구성: base/company/topic/timestamp
+            run_output_dir = build_run_output_dir(args.output_dir, company_filter or default_company_filter, topic)
+            logger.info(f"📁 Run output directory: {run_output_dir}")
+
+            # Engine Arguments 설정 (output_dir을 run_output_dir로 지정)
             engine_args = STORMWikiRunnerArguments(
-                output_dir=args.output_dir,  # 기본 출력 디렉토리
+                output_dir=run_output_dir,
                 max_conv_turn=args.max_conv_turn,
                 max_perspective=args.max_perspective,
                 search_top_k=args.search_top_k,
@@ -532,11 +646,20 @@ def run_batch_analysis(args):
             runner.post_run()
             runner.summary()
 
-            # DB 저장 전에 '방금 만든 폴더'만 인코딩 보정 수행
-            fix_topic_json_encoding(topic, args.output_dir)
+            # 스크립트 레벨 실행 설정 저장
+            write_run_args_json(
+                run_output_dir,
+                topic=topic,
+                company_filter=company_filter,
+                args=args,
+                model_name=current_model_name,
+            )
 
-            # DB에 결과 저장
-            save_report_to_db(topic, args.output_dir, secrets_path, model_name=current_model_name)
+            # DB 저장 전에 '방금 만든 폴더'만 인코딩 보정 수행
+            fix_topic_json_encoding(topic, run_output_dir)
+
+            # DB에 결과 저장 (run_output_dir 기준)
+            save_report_to_db(topic, run_output_dir, secrets_path, model_name=current_model_name)
 
             elapsed = datetime.now() - topic_start_time
             logger.info(f"✓ Completed '{topic}' in {elapsed.total_seconds():.1f}s")
@@ -684,6 +807,8 @@ def main():
     # 실행 모드 분기
     if args.batch:
         # 배치 모드: 기존 ANALYSIS_TARGETS 리스트 일괄 처리
+        # company_name은 토픽에서 자동 추출됨
+        args.company_name = None
         run_batch_analysis(args)
     else:
         # 인터랙티브 모드: CLI에서 기업/주제 선택 후 단건 실행
@@ -692,6 +817,8 @@ def main():
         final_topic = f"{company_name} {topic}"
         # args.topics에 단건 할당하여 기존 run_batch_analysis 로직 재사용
         args.topics = [final_topic]
+        # 선택된 기업명을 args에 추가 (company_filter 기본값으로 사용)
+        args.company_name = company_name
         run_batch_analysis(args)
 
 
