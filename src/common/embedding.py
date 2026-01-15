@@ -32,6 +32,17 @@ from .config import EMBEDDING_CONFIG
 logger = logging.getLogger(__name__)
 
 
+def get_optimal_device() -> str:
+    """Return the best available accelerator in priority order: cuda > mps > cpu."""
+    import torch
+
+    if torch.cuda.is_available():
+        return "cuda"
+    if torch.backends.mps.is_available():
+        return "mps"
+    return "cpu"
+
+
 class BaseEmbedder(ABC):
     """임베딩 생성기 기본 클래스"""
 
@@ -74,12 +85,18 @@ class HuggingFaceEmbedder(BaseEmbedder):
 
         # 디바이스 설정
         if device is None:
-            self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            self.device = get_optimal_device()
         else:
             self.device = device
+            if self.device.startswith("cuda") and not torch.cuda.is_available():
+                logger.warning("Requested CUDA device but CUDA is unavailable. Falling back to CPU.")
+                self.device = "cpu"
+            elif self.device == "mps" and not torch.backends.mps.is_available():
+                logger.warning("Requested MPS device but MPS is unavailable. Falling back to CPU.")
+                self.device = "cpu"
 
         logger.info(f"🔄 Loading HuggingFace embedding model: {self.model_name}")
-        logger.info(f"   Device: {self.device}")
+        logger.info(f"🚀 [System] Embedding Model loaded on: {self.device.upper()}")
 
         # 모델 로드
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
