@@ -327,6 +327,17 @@ class PostgresConnector:
             doc_content = doc.get('content', '')[:500]
             doc_meta = f"{doc_title} {doc_content}".lower()
 
+            # 3.5. [FIX-Search-002] company_name 누락 시 PASS (Loose Matching)
+            # Efficient 모드로 적재된 데이터에 company_name이 없을 수 있음
+            doc_company_name = doc.get('_company_name', '')
+            if not doc_company_name or doc_company_name == 'Unknown Company':
+                # 메타데이터에 company_name이 없으면 필터링 우회 (데이터 살리기)
+                doc['score'] = doc.get('score', 0)  # 점수 유지
+                doc['_entity_match'] = None  # 매칭 여부 불명
+                logger.debug(f"[Rerank] PASS (no company_name in metadata): {doc.get('url', 'unknown')[:40]}...")
+                reranked_results.append(doc)
+                continue
+
             # 4. 매칭 여부 확인 (대소문자 무시)
             is_matched = any(keyword.lower() in doc_meta for keyword in target_keywords)
 
@@ -570,19 +581,20 @@ class PostgresConnector:
 
         results = []
 
-        # 기업명 필터 조건 생성
+        # [FIX-Search-002] 기업명 필터 조건 생성
+        # 메타데이터가 아닌 Companies 테이블 JOIN으로 기업명 조회 (efficient 모드 호환)
         company_condition = ""
         query_params = [embedding_str]
 
         if company_filter_list and len(company_filter_list) > 0:
             # 복수 기업 필터 (비교 분석 모드)
             placeholders = ", ".join(["%s"] * len(company_filter_list))
-            company_condition = f"AND metadata->>'company_name' IN ({placeholders})"
+            company_condition = f"AND c.company_name IN ({placeholders})"
             query_params.extend(company_filter_list)
             logger.info(f"[Filter] Searching with company_filter_list: {company_filter_list}")
         elif company_filter:
             # 단일 기업 필터 (기본 모드)
-            company_condition = "AND metadata->>'company_name' = %s"
+            company_condition = "AND c.company_name = %s"
             query_params.append(company_filter)
             logger.info(f"[Filter] Searching with company_filter: {company_filter}")
         else:
@@ -592,24 +604,27 @@ class PostgresConnector:
 
         try:
             with self.conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # 벡터 유사도 검색 SQL 실행
-                # pgvector의 <=> 연산자: 코사인 거리 (0에 가까울수록 유사)
-                # chunk_type이 'noise_merged'인 청크는 검색에서 제외
-                # company_condition: 기업명 필터 (동적으로 추가)
+                # [FIX-Search-002] JOIN 기반 벡터 유사도 검색 SQL
+                # - Source_Materials → Analysis_Reports → Companies JOIN
+                # - 메타데이터에 company_name이 없어도 Companies 테이블에서 조회
+                # - pgvector의 <=> 연산자: 코사인 거리 (0에 가까울수록 유사)
                 sql = f"""
                     SELECT 
-                        id,
-                        raw_content, 
-                        section_path, 
-                        chunk_type, 
-                        report_id, 
-                        sequence_order,
-                        metadata,
-                        COALESCE((metadata->>'has_merged_meta')::boolean, false) as has_merged_meta,
-                        COALESCE((metadata->>'is_noise_dropped')::boolean, false) as is_noise_dropped,
-                        (embedding <=> %s::vector) as distance
-                    FROM "Source_Materials"
-                    WHERE chunk_type != 'noise_merged'
+                        sm.id,
+                        sm.raw_content, 
+                        sm.section_path, 
+                        sm.chunk_type, 
+                        sm.report_id, 
+                        sm.sequence_order,
+                        sm.metadata,
+                        c.company_name as resolved_company_name,
+                        COALESCE((sm.metadata->>'has_merged_meta')::boolean, false) as has_merged_meta,
+                        COALESCE((sm.metadata->>'is_noise_dropped')::boolean, false) as is_noise_dropped,
+                        (sm.embedding <=> %s::vector) as distance
+                    FROM "Source_Materials" sm
+                    JOIN "Analysis_Reports" ar ON sm.report_id = ar.id
+                    JOIN "Companies" c ON ar.company_id = c.id
+                    WHERE sm.chunk_type != 'noise_merged'
                     {company_condition}
                     ORDER BY distance ASC
                     LIMIT %s
@@ -675,9 +690,10 @@ class PostgresConnector:
                     # 형식: dart_report_{report_id}_chunk_{id}
                     unique_url = f"dart_report_{row['report_id']}_chunk_{row['id']}"
 
-                    # [FEAT-002] Source Tagging을 위한 메타데이터 추가
-                    chunk_metadata = row.get('metadata', {})
-                    company_name = chunk_metadata.get('company_name', 'Unknown Company')
+                    # [FIX-Search-002] Source Tagging을 위한 메타데이터 추가
+                    # JOIN에서 가져온 resolved_company_name 우선 사용 (efficient 모드 호환)
+                    chunk_metadata = row.get('metadata', {}) or {}
+                    company_name = row.get('resolved_company_name') or chunk_metadata.get('company_name', 'Unknown Company')
                     report_id = row['report_id']
 
                     results.append({
@@ -692,6 +708,12 @@ class PostgresConnector:
                     })
 
                 logger.info(f"Found {len(results)} results for query: {query}")
+
+                # [FIX-Search-002] 빈 결과 크래시 방어
+                # 검색 결과가 없으면 Reranker 호출하지 않고 즉시 반환
+                if not results:
+                    logger.warning(f"PostgresRM: Found 0 results for query '{query}'. Skipping rerank.")
+                    return []
 
                 # [FEAT-001] Entity Bias 방지: Entity 매칭 기반 리랭킹 + Dual Filtering
                 # - Factoid 질문: Entity 불일치 시 DROP (Strict Filter)

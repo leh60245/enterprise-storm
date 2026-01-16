@@ -484,8 +484,8 @@ def setup_lm_configs(provider: str = "openai") -> STORMWikiLMConfigs:
         ModelClass = OpenAIModel if api_type == "openai" else AzureOpenAIModel
 
         # 모델명 설정
-        gpt_35_model_name = "gpt-5-mini-2025-08-07" 
-        gpt_4_model_name = "gpt-5.2"
+        gpt_35_model_name = "gpt-4o-mini" 
+        gpt_4_model_name = "gpt-4o"
 
         # Azure 설정 (필요시)
         if api_type == "azure":

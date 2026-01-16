@@ -6,7 +6,7 @@ import os
 import random
 import requests
 import threading
-from typing import Optional, Literal, Any
+from typing import Optional, Literal, Any, List
 import ujson
 from pathlib import Path
 
@@ -269,98 +269,166 @@ class LitellmModel(LM):
 
 
 # ========================================================================
-# The following language model classes were deprecated after v1.1.0.
-# They remain in this file for backward compatibility but will no longer be maintained.
+# Legacy OpenAIModel (deprecated v1/completions). Kept for reference only.
+#
+# class OpenAIModel(dspy.OpenAI):
+#     def __init__(self, model: str = "gpt-4o-mini", api_key: Optional[str] = None,
+#                  model_type: Literal["chat", "text"] = None, **kwargs):
+#         super().__init__(model=model, api_key=api_key, model_type=model_type, **kwargs)
+#         self._token_usage_lock = threading.Lock()
+#         self.prompt_tokens = 0
+#         self.completion_tokens = 0
+#
+#     def log_usage(self, response):
+#         usage_data = response.get("usage")
+#         if usage_data:
+#             with self._token_usage_lock:
+#                 self.prompt_tokens += usage_data.get("prompt_tokens", 0)
+#                 self.completion_tokens += usage_data.get("completion_tokens", 0)
+#
+#     def get_usage_and_reset(self):
+#         usage = {
+#             self.kwargs.get("model")
+#             or self.kwargs.get("engine"): {
+#                 "prompt_tokens": self.prompt_tokens,
+#                 "completion_tokens": self.completion_tokens,
+#             }
+#         }
+#         self.prompt_tokens = 0
+#         self.completion_tokens = 0
+#         return usage
+#
+#     def __call__(self, prompt: str, only_completed: bool = True,
+#                  return_sorted: bool = False, **kwargs) -> list[dict[str, Any]]:
+#         assert only_completed, "for now"
+#         assert return_sorted is False, "for now"
+#         response = self.request(prompt, **kwargs)
+#         self.log_usage(response)
+#         choices = response["choices"]
+#         completed_choices = [c for c in choices if c["finish_reason"] != "length"]
+#         if only_completed and len(completed_choices):
+#             choices = completed_choices
+#         completions = [self._get_choice_text(c) for c in choices]
+#         return completions
 
 
-class OpenAIModel(dspy.OpenAI):
-    """A wrapper class for dspy.OpenAI."""
+class OpenAIModel:
+    """OpenAI client wrapper using the standard Chat Completions API (v1.x).
+
+    - Refactored to match OpenAI Python SDK v1.x best practices[cite: 8].
+    - Uses `client.chat.completions.create` as per documentation.
+    """
 
     def __init__(
         self,
-        model: str = "gpt-4o-mini",
+        model: str = "gpt-4o",  # Updated to a valid model name 
         api_key: Optional[str] = None,
-        model_type: Literal["chat", "text"] = None,
+        api_base: Optional[str] = None,
+        temperature: float = 0.7,
+        top_p: Optional[float] = None,
+        max_output_tokens: int = 1024,
         **kwargs,
     ):
-        super().__init__(model=model, api_key=api_key, model_type=model_type, **kwargs)
+        self.model = model
+        # Environment variable is automatically handled by SDK, but kept for flexibility [cite: 38]
+        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
+        self.api_base = api_base
+        
+        client_kwargs = {"api_key": self.api_key}
+        if api_base:
+            client_kwargs["base_url"] = api_base
+        
+        # Standard Client Instantiation [cite: 21]
+        self.client = OpenAI(**client_kwargs)
+
         self._token_usage_lock = threading.Lock()
         self.prompt_tokens = 0
         self.completion_tokens = 0
+        self.history = []
 
-    def log_usage(self, response):
-        """Log the total tokens from the OpenAI API response."""
-        usage_data = response.get("usage")
-        if usage_data:
-            with self._token_usage_lock:
-                self.prompt_tokens += usage_data.get("prompt_tokens", 0)
-                self.completion_tokens += usage_data.get("completion_tokens", 0)
+        # Mapping max_output_tokens to max_completion_tokens for newer models 
+        self.max_completion_tokens = max_output_tokens
+        
+        self.kwargs = {
+            "temperature": temperature,
+            **kwargs,
+        }
+        if top_p is not None:
+            self.kwargs["top_p"] = top_p
+
+    def log_usage(self, usage):
+        if not usage:
+            return
+        # Handle usage object or dict
+        input_tokens = getattr(usage, "prompt_tokens", 0) or usage.get("prompt_tokens", 0)
+        output_tokens = getattr(usage, "completion_tokens", 0) or usage.get("completion_tokens", 0)
+        
+        with self._token_usage_lock:
+            self.prompt_tokens += input_tokens
+            self.completion_tokens += output_tokens
 
     def get_usage_and_reset(self):
-        """Get the total tokens used and reset the token usage."""
         usage = {
-            self.kwargs.get("model")
-            or self.kwargs.get("engine"): {
+            self.model: {
                 "prompt_tokens": self.prompt_tokens,
                 "completion_tokens": self.completion_tokens,
             }
         }
         self.prompt_tokens = 0
         self.completion_tokens = 0
-
         return usage
 
-    def __call__(
-        self,
-        prompt: str,
-        only_completed: bool = True,
-        return_sorted: bool = False,
-        **kwargs,
-    ) -> list[dict[str, Any]]:
-        """Copied from dspy/dsp/modules/gpt3.py with the addition of tracking token usage."""
+    def __call__(self, prompt: str, **kwargs) -> List[str]:
+        req_kwargs = {**self.kwargs, **kwargs}
+        
+        # Cleanup unsupported kwargs for chat completions
+        req_kwargs.pop("n", None)
+        
+        # Override defaults if provided in call
+        temperature = req_kwargs.pop("temperature", self.kwargs.get("temperature"))
+        top_p = req_kwargs.pop("top_p", self.kwargs.get("top_p"))
+        
+        # Handle token limit parameter name change (max_tokens -> max_completion_tokens) 
+        max_tokens_val = req_kwargs.pop(
+            "max_tokens", req_kwargs.pop("max_output_tokens", self.max_completion_tokens)
+        )
 
-        assert only_completed, "for now"
-        assert return_sorted is False, "for now"
+        try:
+            # Correct endpoint: client.chat.completions.create 
+            response = self.client.chat.completions.create(
+                model=self.model,
+                # Correct input parameter: messages list 
+                messages=[{"role": "user", "content": prompt}], 
+                temperature=temperature,
+                max_completion_tokens=max_tokens_val, # 
+                **({} if top_p is None else {"top_p": top_p}),
+                **req_kwargs,
+            )
 
-        # if kwargs.get("n", 1) > 1:
-        #     if self.model_type == "chat":
-        #         kwargs = {**kwargs}
-        #     else:
-        #         kwargs = {**kwargs, "logprobs": 5}
+            # Correct response parsing 
+            output_text = response.choices[0].message.content
+            
+            # Log usage
+            if hasattr(response, "usage"):
+                self.log_usage(response.usage)
 
-        response = self.request(prompt, **kwargs)
+            entry = {
+                "prompt": prompt,
+                "kwargs": {
+                    "temperature": temperature,
+                    "top_p": top_p,
+                    "max_completion_tokens": max_tokens_val,
+                },
+                "response": response.model_dump() if hasattr(response, "model_dump") else response,
+                "outputs": [output_text],
+            }
+            self.history.append(entry)
 
-        # Log the token usage from the OpenAI API response.
-        self.log_usage(response)
+            return [output_text]
 
-        choices = response["choices"]
-
-        completed_choices = [c for c in choices if c["finish_reason"] != "length"]
-
-        if only_completed and len(completed_choices):
-            choices = completed_choices
-
-        completions = [self._get_choice_text(c) for c in choices]
-        if return_sorted and kwargs.get("n", 1) > 1:
-            scored_completions = []
-
-            for c in choices:
-                tokens, logprobs = (
-                    c["logprobs"]["tokens"],
-                    c["logprobs"]["token_logprobs"],
-                )
-
-                if "<|endoftext|>" in tokens:
-                    index = tokens.index("<|endoftext|>") + 1
-                    tokens, logprobs = tokens[:index], logprobs[:index]
-
-                avglog = sum(logprobs) / len(logprobs)
-                scored_completions.append((avglog, self._get_choice_text(c)))
-
-            scored_completions = sorted(scored_completions, reverse=True)
-            completions = [c for _, c in scored_completions]
-
-        return completions
+        except Exception as e:
+            print(f"API Error: {e}")
+            return []
 
 
 class DeepSeekModel(dspy.OpenAI):
