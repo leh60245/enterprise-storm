@@ -49,6 +49,29 @@
 1. **외부 API 모델명 형식 확인**: API 버전에 따라 모델명 형식이 다를 수 있음
 2. **방어적 코딩**: 모델명 정규화 로직을 추가하여 다양한 입력 형식 지원
 
+### [2026-01-16] ReportResponse references_data 타입 오류
+
+**오류 상황:**
+```
+1 validation error for ReportResponse
+references_data
+  Input should be a valid list [type=list_type, input_value={'url_to_info': {...}}, input_type=dict]
+```
+
+**원인:**
+- ReportResponse 모델에서 `references_data: Optional[List[Dict[str, Any]]]`로 정의
+- 실제 DB (Generated_Reports)의 references_data JSONB는 `{'url_to_info': {...}}` 형식 (dict)
+- Pydantic validation 실패
+
+**해결 방안:**
+- ReportResponse.references_data를 `Optional[Dict[str, Any]]`로 변경
+- DB의 실제 JSONB 형식에 맞추기
+
+**교훈 (규칙 추가):**
+1. **DB 스키마 먼저 확인**: 테이블 구조를 확인 후 Pydantic 모델 정의
+2. **Mock 데이터 생성 금지**: 실제 DB에 테스트 데이터 임의 삽입 금지
+3. **JSONB 타입 명확화**: JSONB 필드의 형식을 사전에 파악 필요
+
 ### [2026-01-10] Gemini 응답 `list index out of range` 오류
 
 **오류 상황:**
