@@ -125,11 +125,12 @@ class DBManager:
                 ON "Source_Materials"(report_id, chunk_type);
             """)
 
-            # 4. AI 생성 리포트 테이블
+            # 4. AI 생성 리포트 테이블 (company_id FK 추가)
             self.cursor.execute("""
                 CREATE TABLE IF NOT EXISTS "Generated_Reports" (
                     id SERIAL PRIMARY KEY,
                     company_name VARCHAR(100) NOT NULL,
+                    company_id INTEGER REFERENCES "Companies"(id) ON DELETE CASCADE,
                     topic TEXT NOT NULL,
                     report_content TEXT,
                     toc_text TEXT,
@@ -145,6 +146,11 @@ class DBManager:
             self.cursor.execute("""
                 CREATE INDEX IF NOT EXISTS idx_reports_company 
                 ON "Generated_Reports"(company_name);
+            """)
+            
+            self.cursor.execute("""
+                CREATE INDEX IF NOT EXISTS idx_reports_company_id 
+                ON "Generated_Reports"(company_id);
             """)
 
             self.cursor.execute("""
@@ -342,10 +348,13 @@ class DBManager:
 
         Returns:
             int: 저장된 블록 수
+            
+        Raises:
+            Exception: 블록 저장 실패 시 즉시 예외 전파 (Silent Failure 방지)
         """
         count = 0
         for idx, block in enumerate(blocks):
-            if self.insert_source_material(
+            success = self.insert_source_material(
                 report_id=report_id,
                 content=block.get('content', ''),
                 chunk_type=block.get('chunk_type', 'text'),
@@ -353,8 +362,13 @@ class DBManager:
                 sequence_order=block.get('sequence_order', idx),
                 table_metadata=block.get('table_metadata'),
                 metadata=metadata
-            ):
-                count += 1
+            )
+            # 🔴 FIX: Silent Failure 방지 - 실패 시 즉시 예외 발생
+            if not success:
+                error_msg = f"블록 저장 실패 (report_id={report_id}, block_idx={idx}, type={block.get('chunk_type')})"
+                print(f"❌ {error_msg}")
+                raise Exception(error_msg)
+            count += 1
         return count
 
     def get_materials_by_report(self, report_id: int) -> List[Dict]:
@@ -392,7 +406,8 @@ class DBManager:
         references_data: dict,
         conversation_log: dict,
         meta_info: dict,
-        model_name: str = 'gpt-4o'
+        model_name: str = 'gpt-4o',
+        company_id: Optional[int] = None
     ) -> Optional[int]:
         """
         AI가 생성한 리포트를 저장합니다.
@@ -406,17 +421,24 @@ class DBManager:
             conversation_log: 대화 로그 (JSON)
             meta_info: 메타 정보 (JSON)
             model_name: 사용된 AI 모델명 (기본: gpt-4o)
+            company_id: 기업 ID (FK, 선택) - None이면 company_name으로 자동 조회
 
         Returns:
             int: 생성된 리포트 ID (성공 시) 또는 None (실패 시)
         """
         try:
+            # company_id가 없으면 company_name으로 조회
+            if company_id is None:
+                company = self.get_company_by_name(company_name)
+                if company:
+                    company_id = company['id']
+            
             sql = """
                 INSERT INTO "Generated_Reports" (
-                    company_name, topic, report_content, toc_text,
+                    company_name, company_id, topic, report_content, toc_text,
                     references_data, conversation_log, meta_info, model_name
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id;
             """
 
@@ -424,6 +446,7 @@ class DBManager:
                 sql,
                 (
                     company_name,
+                    company_id,
                     topic,
                     report_content,
                     toc_text,
