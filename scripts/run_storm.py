@@ -365,12 +365,12 @@ def save_report_to_db(topic: str, output_dir: str, secrets_path: str, model_name
     }
 
     # ========================================
-    # Step 4: company_name 추출
+    # Step 4: company_name 추출 및 company_id 조회
     # ========================================
     company_name = topic.split()[0] if topic else "Unknown"
 
     # ========================================
-    # Step 5: DB INSERT
+    # Step 5: DB INSERT (with company_id FK)
     # ========================================
     try:
         # DB 접속 정보 로드
@@ -383,15 +383,29 @@ def save_report_to_db(topic: str, output_dir: str, secrets_path: str, model_name
         )
 
         cursor = conn.cursor()
+        
+        # 🔧 FIX: company_name으로 company_id 조회
+        cursor.execute("""
+            SELECT id FROM "Companies" WHERE company_name = %s
+        """, (company_name,))
+        result = cursor.fetchone()
+        
+        if not result:
+            logger.warning(f"⚠️ Company '{company_name}' not found in Companies table. Inserting without company_id.")
+            company_id = None
+        else:
+            company_id = result[0]
+            logger.info(f"✓ Found company_id: {company_id} for '{company_name}'")
 
         insert_query = """
         INSERT INTO "Generated_Reports"
-        (company_name, topic, report_content, toc_text, references_data, conversation_log, meta_info, model_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        (company_name, company_id, topic, report_content, toc_text, references_data, conversation_log, meta_info, model_name)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
 
         cursor.execute(insert_query, (
             company_name,
+            company_id,  # 🔧 NEW: FK 추가
             topic,
             report_content,
             toc_text,
@@ -405,7 +419,7 @@ def save_report_to_db(topic: str, output_dir: str, secrets_path: str, model_name
         cursor.close()
         conn.close()
 
-        logger.info(f"✓ Report saved to DB: {topic}")
+        logger.info(f"✓ Report saved to DB: {topic} (company_id={company_id})")
         return True
 
     except Exception as e:

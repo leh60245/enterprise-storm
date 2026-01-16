@@ -108,7 +108,7 @@ class DataPipeline:
             stock_codes = ["005930", "000660", "035420"]
 
         print("\n🧪 테스트 모드로 실행")
-        return self.run(stock_codes=stock_codes, reset_db=True)
+        return self.run(stock_codes=stock_codes, reset_db=False)
 
     def run_all(self, reset_db: bool = False):
         """

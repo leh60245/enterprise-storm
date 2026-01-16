@@ -1,0 +1,63 @@
+version: '3.8'
+
+services:
+  # ----------------------------------------
+  # 1. 데이터베이스 (PostgreSQL)
+  # ----------------------------------------
+  db:
+    image: pgvector/pgvector:pg15
+    container_name: storm-db
+    restart: always
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 1234
+      POSTGRES_DB: postgres
+    volumes:
+      - D:/DockerData/postgres:/var/lib/postgresql/data
+    networks:
+      - storm-network
+
+  # ----------------------------------------
+  # 2. AI 서버 (Ollama - Docker 버전)
+  # ----------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: storm-ai
+    restart: always
+    tty: true
+    ports:
+      - "11434:11434"
+    volumes:
+      # 여기에 모델이 새로 저장됩니다 (기존 윈도우용과 분리됨)
+      - D:/DockerData/ollama_new:/root/.ollama
+    # 윈도우 Docker Desktop에서 GPU를 쓰기 위한 핵심 설정
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    networks:
+      - storm-network
+
+  # ----------------------------------------
+  # 3. 관제 도구 (Portainer)
+  # ----------------------------------------
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: storm-monitor
+    restart: always
+    ports:
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - D:/DockerData/portainer:/data
+    networks:
+      - storm-network
+
+networks:
+  storm-network:
+    driver: bridge
