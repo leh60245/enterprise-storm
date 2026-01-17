@@ -17,8 +17,13 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 # Database 모듈 임포트
-from backend.database import get_db_cursor, query_report_by_id, query_all_reports
-from src.common.config import get_topic_list_for_api
+from backend.database import (
+    get_db_cursor,
+    query_report_by_id,
+    query_reports_with_filters,
+    query_companies_from_db,
+)
+from src.common.config import get_topic_list_for_api, get_canonical_company_name, JOB_STATUS
 from psycopg2.extras import RealDictCursor
 import psycopg2
 
@@ -28,7 +33,7 @@ import psycopg2
 app = FastAPI(
     title="Enterprise STORM API",
     description="AI-powered Corporate Report Generation API",
-    version="2.0.0",
+    version="2.1.0",
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json"
@@ -66,61 +71,46 @@ class GenerateRequest(BaseModel):
 
 class JobStatusResponse(BaseModel):
     """작업 상태 조회 응답 모델"""
+
     job_id: str
     status: str  # "processing" | "completed" | "failed"
+    report_id: Optional[int] = None
     progress: Optional[int] = None  # 0-100
     message: Optional[str] = None
 
 
 class ReportResponse(BaseModel):
-    """
-    리포트 조회 응답 모델 (Generated_Reports 테이블 스키마 매칭)
-    
-    DB 스키마:
-    - id SERIAL PRIMARY KEY
-    - company_name VARCHAR(255)
-    - topic TEXT
-    - report_content TEXT (Markdown)
-    - toc_text TEXT
-    - references_data JSONB
-    - conversation_log JSONB
-    - meta_info JSONB
-    - model_name VARCHAR(100)
-    - created_at TIMESTAMP
-    - status VARCHAR(50)
-    """
+    """리포트 조회 응답 모델 (API v2.1)"""
+
     model_config = ConfigDict(
         json_schema_extra={
             "example": {
-                "id": 1,
+                "report_id": 1,
                 "company_name": "SK하이닉스",
                 "topic": "종합 분석",
                 "report_content": "# SK하이닉스 종합 분석\n\n## 1. 개요\n...",
                 "toc_text": "1. 개요\n2. 재무 분석\n3. 전망",
-                "references_data": [
-                    {"source": "DART 2023 사업보고서", "content": "..."}
+                "references": [
+                    {"doc_id": 101, "source": "DART 2023 사업보고서", "content": "..."}
                 ],
-                "meta_info": {
-                    "search_queries": ["SK하이닉스 재무", "HBM 시장"],
-                    "retrieval_count": 25
-                },
+                "meta_info": {"search_queries": ["SK하이닉스 재무", "HBM 시장"]},
                 "model_name": "gpt-4o",
                 "created_at": "2026-01-15T10:30:00",
-                "status": "completed"
+                "status": "completed",
             }
         }
     )
-    
-    id: int
+
+    report_id: int
     company_name: str
     topic: str
     report_content: str  # Markdown Content
     toc_text: Optional[str] = None
-    references_data: Optional[Dict[str, Any]] = None  # JSONB 형식 (url_to_info 등)
+    references: Optional[Dict[str, Any]] = None  # JSONB: url_to_info structure
     meta_info: Optional[Dict[str, Any]] = None
     model_name: Optional[str] = "gpt-4o"
     created_at: Optional[str] = None
-    status: str = "completed"
+    status: str = JOB_STATUS.COMPLETED.value
 
 
 class ReportListResponse(BaseModel):
@@ -138,7 +128,7 @@ async def root():
     """Health Check 엔드포인트"""
     return {
         "service": "Enterprise STORM API",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "status": "operational",
         "mode": "production",
         "database": "PostgreSQL",
@@ -155,25 +145,9 @@ async def get_companies():
         List[str]: 기업명 목록 (예: ["SK하이닉스", "현대엔지니어링", ...])
     """
     try:
-        with get_db_cursor(RealDictCursor) as cur:
-            cur.execute("""
-                SELECT DISTINCT company_name
-                FROM "Generated_Reports"
-                ORDER BY company_name ASC
-            """)
-            
-            results = cur.fetchall()
-            companies = [row['company_name'] for row in results]
-            
-            # DB에 데이터가 없으면 샘플 데이터 반환
-            if not companies:
-                companies = ["SK하이닉스", "현대엔지니어링", "NAVER", "삼성전자", "LG전자"]
-            
-            return companies
-            
+        return query_companies_from_db()
     except Exception as e:
         print(f"❌ Error fetching companies: {e}")
-        # Fallback 데이터
         return ["SK하이닉스", "현대엔지니어링", "NAVER", "삼성전자", "LG전자"]
 
 
@@ -222,17 +196,14 @@ async def generate_report(request: GenerateRequest):
     4. Celery/Redis 비동기 작업 큐
     """
     try:
-        # ✅ 중요: 입력 검증
-        # topic이 이미 company_name을 포함하면 제거 (방어적 코딩)
-        topic = request.topic
-        company_name = request.company_name
-        
-        # 만약 topic에 company_name이 포함되어 있으면 제거
-        # 예: "SK하이닉스 기업 개요" → "기업 개요"
-        if topic.startswith(company_name):
-            topic = topic[len(company_name):].strip()
-        
-        # DB에서 가장 최근 리포트 ID 조회
+        company_name = get_canonical_company_name(request.company_name.strip())
+        raw_topic = request.topic.strip()
+
+        clean_topic = raw_topic.replace(company_name, "").strip()
+        clean_topic = " ".join(clean_topic.split())  # normalize spaces
+        if not clean_topic:
+            clean_topic = raw_topic
+
         with get_db_cursor(RealDictCursor) as cur:
             cur.execute("""
                 SELECT id FROM "Generated_Reports"
@@ -240,29 +211,21 @@ async def generate_report(request: GenerateRequest):
             """)
             result = cur.fetchone()
             latest_id = result['id'] if result else 1
-        
-        # ✅ LLM 엔진 호출 시에만 합쳐서 사용
-        # (현재는 mock이지만, run_storm.py 연동 시 여기에 query 구성)
-        llm_query = f"{company_name} {topic}"
+
+        llm_query = f"{company_name} {clean_topic}".strip()
         print(f"[INFO] LLM Query: {llm_query}")
-        
+
         return JobStatusResponse(
             job_id=f"job-{latest_id}",
-            status="processing",
+            status=JOB_STATUS.PROCESSING.value,
             progress=0,
-            message=f"{company_name}에 대한 '{topic}' 리포트 생성을 시작합니다."
+            message=f"{company_name}에 대한 '{clean_topic}' 리포트 생성을 시작합니다.",
         )
     except Exception as e:
         print(f"❌ Error in generate_report: {e}")
         return JobStatusResponse(
             job_id="mock-job-001",
-            status="processing",
-            progress=0,
-            message=f"{request.company_name}에 대한 '{request.topic}' 리포트 생성을 시작합니다."
-        )
-        return JobStatusResponse(
-            job_id="mock-job-001",
-            status="processing",
+            status=JOB_STATUS.PROCESSING.value,
             progress=0,
             message=f"{request.company_name}에 대한 '{request.topic}' 리포트 생성을 시작합니다."
         )
@@ -289,8 +252,9 @@ async def get_job_status(job_id: str):
             report_id = int(match.group())
             return JobStatusResponse(
                 job_id=job_id,
-                status="completed",
+                status=JOB_STATUS.COMPLETED.value,
                 progress=100,
+                report_id=report_id,
                 message=f"리포트 생성이 완료되었습니다. /api/report/{report_id} 로 조회하세요."
             )
     except Exception as e:
@@ -299,14 +263,15 @@ async def get_job_status(job_id: str):
     # 기본값
     return JobStatusResponse(
         job_id=job_id,
-        status="completed",
+        status=JOB_STATUS.COMPLETED.value,
         progress=100,
+        report_id=1,
         message="리포트 생성이 완료되었습니다. /api/report/1 로 조회하세요."
     )
 
 
-@app.get("/api/report/{id}", response_model=ReportResponse)
-async def get_report(id: int):
+@app.get("/api/report/{report_id}", response_model=ReportResponse)
+async def get_report(report_id: int):
     """
     [GET] 리포트 조회 (핵심 엔드포인트 - DB 연동)
     
@@ -329,39 +294,39 @@ async def get_report(id: int):
     """
     try:
         # 데이터베이스에서 리포트 조회
-        result = query_report_by_id(id)
+        result = query_report_by_id(report_id)
         
         if not result:
             raise HTTPException(
                 status_code=404,
-                detail=f"Report with ID {id} not found in database"
+                detail=f"Report with ID {report_id} not found in database"
             )
         
         # RealDictCursor 결과를 Pydantic 모델로 변환
         # JSONB 필드(references_data, meta_info)는 자동으로 딕셔너리로 파싱됨
         return ReportResponse(
-            id=result['id'],
+            report_id=result['id'],
             company_name=result['company_name'],
             topic=result['topic'],
             report_content=result['report_content'],
             toc_text=result.get('toc_text'),
-            references_data=result.get('references_data'),
+            references=result.get('references_data'),
             meta_info=result.get('meta_info'),
             model_name=result.get('model_name', 'unknown'),
             created_at=result.get('created_at').isoformat() if result.get('created_at') else None,
-            status='completed'
+            status=JOB_STATUS.COMPLETED.value,
         )
         
     except psycopg2.Error as e:
         # DB 연결 에러
-        print(f"❌ Database error fetching report {id}: {e}")
+        print(f"❌ Database error fetching report {report_id}: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Database error: {str(e)}"
         )
     except Exception as e:
         # 기타 예외
-        print(f"❌ Error fetching report {id}: {e}")
+        print(f"❌ Error fetching report {report_id}: {e}")
         raise HTTPException(
             status_code=500,
             detail=f"Internal server error: {str(e)}"
@@ -369,25 +334,43 @@ async def get_report(id: int):
 
 
 @app.get("/api/reports", response_model=ReportListResponse)
-async def list_reports(limit: int = 10, offset: int = 0):
-    """
-    [GET] 리포트 목록 조회 (DB 연동)
-    
-    실제 동작 (차후 구현):
-    - Generated_Reports 테이블에서 최신순 정렬 조회
-    - Pagination 지원
-    
-    현재 동작 (DB):
-    - 데이터베이스에서 최신 리포트 목록 반환
-    """
+async def list_reports(
+    company_name: Optional[str] = None,
+    topic: Optional[str] = None,
+    sort_by: str = "created_at",
+    order: str = "desc",
+    limit: int = 10,
+    offset: int = 0,
+):
+    """[GET] 리포트 목록 조회 (필터/정렬 지원)"""
+
     try:
-        reports = query_all_reports(limit=limit, offset=offset)
-        
-        return ReportListResponse(
-            total=len(reports),
-            reports=reports
+        result = query_reports_with_filters(
+            company_name=company_name,
+            topic=topic,
+            sort_by=sort_by,
+            order=order,
+            limit=limit,
+            offset=offset,
         )
-        
+
+        reports = [
+            {
+                "report_id": row.get("report_id") or row.get("id"),
+                "company_name": row.get("company_name"),
+                "topic": row.get("topic"),
+                "model_name": row.get("model_name"),
+                "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
+                "status": JOB_STATUS.COMPLETED.value,
+            }
+            for row in result.get("reports", [])
+        ]
+
+        return ReportListResponse(
+            total=result.get("total", 0),
+            reports=reports,
+        )
+
     except Exception as e:
         print(f"❌ Error querying reports: {e}")
         raise HTTPException(

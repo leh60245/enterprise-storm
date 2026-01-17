@@ -10,6 +10,7 @@ AI와 Ingestion 양쪽에서 사용하는 모든 설정을 중앙 관리합니�
 - DART: DART_API_KEY
 """
 import os
+from enum import Enum
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -121,17 +122,22 @@ AI_CONFIG = {
 }
 
 # =============================================================================
+class JOB_STATUS(Enum):
+    """표준화된 작업 상태 Enum (API 간 일관성 유지)."""
+
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 # Analysis Topic Configuration (분석 주제 중앙 관리)
 # =============================================================================
-# Key-Value 구조로 topic 정의 - 프론트/백 전체에서 사용
-# - id: 주제의 고유 식별자 (변경 불가, 데이터 무결성 보장)
-# - label: UI에 표시될 주제명 (변경 가능)
-# - value: DB/LLM에 전달될 순수한 주제 텍스트
+# API v2.1 기준 Topic 정의 (공통 사용)
 TOPICS = [
     {
         "id": "T01",
         "label": "기업 개요 및 주요 사업 내용",
-        "value": "기업 개요 및 주요 사업 내용"
+        "value": "기업 개요 및 주요 사업 내용",
     },
     {
         "id": "T02",
@@ -161,8 +167,8 @@ TOPICS = [
     {
         "id": "custom",
         "label": "직접 입력",
-        "value": None  # Frontend에서 사용자 입력값으로 대체됨
-    }
+        "value": None,
+    },
 ]
 
 

@@ -29,6 +29,20 @@ export const fetchTopics = async () => {
 };
 
 /**
+ * 리포트 목록 조회 (필터/정렬 지원)
+ * GET /api/reports
+ */
+export const fetchReports = async (params = {}) => {
+  try {
+    const response = await apiClient.get('/api/reports', { params });
+    return response.data;
+  } catch (error) {
+    console.error('Failed to fetch reports:', error);
+    throw error;
+  }
+};
+
+/**
  * 기업 목록 조회
  * GET /api/companies
  */

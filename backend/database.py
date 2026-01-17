@@ -121,9 +121,9 @@ def query_report_by_id(report_id: int) -> Optional[Dict[str, Any]]:
     try:
         with get_db_cursor(RealDictCursor) as cur:
             cur.execute("""
-                SELECT id, company_name, topic, report_content,
-                       toc_text, references_data, meta_info,
-                       model_name, created_at
+                  SELECT id, company_name, topic, report_content,
+                      toc_text, references_data, meta_info,
+                      model_name, created_at
                 FROM "Generated_Reports"
                 WHERE id = %s
             """, (report_id,))
@@ -136,32 +136,88 @@ def query_report_by_id(report_id: int) -> Optional[Dict[str, Any]]:
         raise
 
 
-def query_all_reports(limit: int = 10, offset: int = 0) -> List[Dict[str, Any]]:
-    """
-    모든 리포트 조회 (최신순)
-    
-    Args:
-        limit: 조회 개수 (기본값: 10)
-        offset: 시작 위치 (기본값: 0)
-        
-    Returns:
-        리포트 목록 (딕셔너리 배열)
-    """
+def query_reports_with_filters(
+    *,
+    company_name: Optional[str] = None,
+    topic: Optional[str] = None,
+    sort_by: str = "created_at",
+    order: str = "desc",
+    limit: int = 10,
+    offset: int = 0,
+) -> Dict[str, Any]:
+    """리포트 조회 (필터/정렬 지원)"""
+
+    allowed_sort = {
+        "created_at": '"created_at"',
+        "company_name": '"company_name"',
+        "topic": '"topic"',
+        "model_name": '"model_name"',
+    }
+    sort_clause = allowed_sort.get(sort_by, '"created_at"')
+    order_clause = "ASC" if order and order.lower() == "asc" else "DESC"
+
+    where_clause = []
+    params: List[Any] = []
+
+    if company_name:
+        where_clause.append('"company_name" = %s')
+        params.append(company_name)
+    if topic:
+        where_clause.append('"topic" ILIKE %s')
+        params.append(f"%{topic}%")
+
+    where_sql = f"WHERE {' AND '.join(where_clause)}" if where_clause else ""
+
     try:
         with get_db_cursor(RealDictCursor) as cur:
-            cur.execute("""
-                SELECT id, company_name, topic, model_name, created_at
+            count_sql = f"""
+                SELECT COUNT(*) AS total
                 FROM "Generated_Reports"
-                ORDER BY created_at DESC
+                {where_sql}
+            """
+            cur.execute(count_sql, params)
+            total_row = cur.fetchone()
+            total = total_row["total"] if total_row else 0
+
+            query_sql = f"""
+                SELECT id AS report_id, company_name, topic, model_name, created_at
+                FROM "Generated_Reports"
+                {where_sql}
+                ORDER BY {sort_clause} {order_clause}
                 LIMIT %s OFFSET %s
-            """, (limit, offset))
-            
+            """
+            cur.execute(query_sql, [*params, limit, offset])
             results = cur.fetchall()
-            return results
-            
+
+            return {
+                "total": total,
+                "reports": results,
+            }
+
     except Exception as e:
         print(f"❌ Error querying reports: {e}")
         raise
+
+
+def query_companies_from_db() -> List[str]:
+    """Companies 테이블에서 기업 목록을 조회한다."""
+    queries = [
+        'SELECT DISTINCT company_name FROM "Companies" ORDER BY company_name ASC',
+        'SELECT DISTINCT company_name FROM "Generated_Reports" ORDER BY company_name ASC',
+    ]
+    for sql in queries:
+        try:
+            with get_db_cursor(RealDictCursor) as cur:
+                cur.execute(sql)
+                rows = cur.fetchall()
+                companies = [row.get("company_name") for row in rows if row.get("company_name")] # type: ignore
+                if companies:
+                    return companies
+        except Exception as e:
+            print(f"⚠️ Company query failed for SQL={sql}: {e}")
+
+    # Fallback 샘플 데이터
+    return ["SK하이닉스", "현대엔지니어링", "NAVER", "삼성전자", "LG전자"]
 
 
 def test_connection():

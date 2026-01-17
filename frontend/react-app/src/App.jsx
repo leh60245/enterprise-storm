@@ -62,15 +62,24 @@ const theme = createTheme({
 function App() {
   const [view, setView] = useState('dashboard'); // 'dashboard' | 'viewer'
   const [jobId, setJobId] = useState(null);
+  const [reportId, setReportId] = useState(null);
 
   const handleReportStart = (newJobId) => {
     setJobId(newJobId);
+    setReportId(null);
+    setView('viewer');
+  };
+
+  const handleViewReport = (id) => {
+    setReportId(id);
+    setJobId(null);
     setView('viewer');
   };
 
   const handleBackToDashboard = () => {
     setView('dashboard');
     setJobId(null);
+    setReportId(null);
   };
 
   return (
@@ -87,10 +96,12 @@ function App() {
           <Dashboard
             onReportStart={handleReportStart}
             onJobIdChange={setJobId}
+            onViewReport={handleViewReport}
           />
         ) : (
           <ReportViewer
             jobId={jobId}
+            reportId={reportId}
             onBack={handleBackToDashboard}
           />
         )}

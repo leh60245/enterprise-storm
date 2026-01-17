@@ -343,3 +343,152 @@ company_name 없음: 34,393 (efficient mode)
 - **Verified by**: Manual Test - 현대엔지니어링 분석 성공 (2026-01-16 18:00)
 - **Commit**: `15250d6` 
 - **Status**: ✅ Deployed to `main` branch
+
+---
+
+### 3. API v2.1 Schema Mismatch Fixes (P1)
+
+#### Problem 3.1: Companies 테이블 컬럼명 오류
+
+**Issue:** Companies 테이블의 실제 컬럼명이 `name`이 아닌 `company_name`
+
+```python
+# 🔴 BEFORE (쿼리 실패):
+cur.execute("""
+    SELECT DISTINCT name AS company_name 
+    FROM "Companies" 
+    ORDER BY name ASC
+""")
+# Error: column "name" does not exist
+```
+
+**Fix:**
+```python
+# ✅ AFTER (수정):
+cur.execute("""
+    SELECT DISTINCT company_name 
+    FROM "Companies" 
+    ORDER BY company_name ASC
+""")
+```
+
+**Files Changed:**
+- `backend/database.py` (Line 196-207): `query_companies_from_db()` 쿼리 수정
+
+#### Problem 3.2: Generated_Reports.status 컬럼 부재
+
+**Issue:** DB 스키마에 status 컬럼이 없는데도 쿼리 시 조회하려는 버그
+
+```python
+# 🔴 BEFORE (쿼리 실패):
+cur.execute("""
+    SELECT id AS report_id, ..., status  -- ❌ status 없음
+    FROM "Generated_Reports"
+""")
+# Error: column "status" does not exist
+```
+
+**실제 스키마 (2026-01-17 확인):**
+```
+Columns in Generated_Reports:
+  - id: integer
+  - company_name: character varying
+  - company_id: integer
+  - topic: text
+  - report_content: text
+  - toc_text: text
+  - references_data: jsonb
+  - conversation_log: jsonb
+  - meta_info: jsonb
+  - model_name: character varying
+  - created_at: timestamp without time zone
+  ← status 컬럼 없음
+```
+
+**Fix:**
+```python
+# ✅ AFTER (status 제거):
+cur.execute("""
+    SELECT id AS report_id, company_name, topic, model_name, created_at
+    FROM "Generated_Reports"
+""")
+# API 응답: status는 항상 "completed" 기본값 사용
+```
+
+**Files Changed:**
+- `backend/database.py` (Line 114-119, 178-185): status 제거
+- `backend/main.py` (Line 370-375, 437-439): status는 기본값 "completed" 사용
+
+#### Problem 3.3: references_data 타입 검증 실패
+
+**Issue:** API 응답에서 references가 딕셔너리 구조인데 List로 정의
+
+```python
+# 🔴 BEFORE (Validation Error):
+references: Optional[List[Dict[str, Any]]] = None
+# 실제 DB 구조: {"url_to_info": {"dart_report_3_chunk_6044": {...}}}
+# Error: Input should be a valid list [type=list_type, input_value={'url_to_info': {...}}]
+```
+
+**DB 실제 구조:**
+```json
+{
+  "url_to_info": {
+    "dart_report_3_chunk_6044": {
+      "title": "...",
+      "snippet": "...",
+      "url": "..."
+    },
+    ...
+  }
+}
+```
+
+**Fix:**
+```python
+# ✅ AFTER (Dict로 변경):
+references: Optional[Dict[str, Any]] = None
+
+# 프론트엔드 렌더링:
+Object.entries(report.references.url_to_info).map(([url, info]) => {
+  // url: "dart_report_3_chunk_6044"
+  // info: {title, snippet, url}
+})
+```
+
+**Files Changed:**
+- `backend/main.py` (Line 98): `ReportResponse.references` 타입 변경
+- `frontend/react-app/src/components/ReportViewer.jsx` (Line ~304-334): url_to_info 구조 렌더링
+
+#### Verification
+
+```bash
+# 1. 스키마 확인
+python -m backend.check_schema
+
+# 2. 엔드포인트 테스트
+curl http://localhost:8000/api/companies
+curl http://localhost:8000/api/reports?sort_by=created_at&order=desc
+curl http://localhost:8000/api/report/3
+
+# 3. Frontend 테스트
+# - 대시보드 접속 → 기업 목록 로드
+# - 리포트 테이블 표시
+# - "보기" 버튼 → 참고 문헌 렌더링
+```
+
+**Expected Result:**
+```
+✅ companies 엔드포인트: 기업 목록 정상 조회
+✅ reports 엔드포인트: 리포트 목록 필터/정렬 작동
+✅ report 엔드포인트: references dict 정상 반환
+✅ Frontend: 모든 테이블/모달/뷰어 정상 작동
+```
+
+#### Approval Log (FIX-v2.1-Schema)
+- **Identified by**: Frontend testing (2026-01-17 09:00)
+- **Fixed by**: AI Developer (2026-01-17 09:00-10:30)
+- **Root Cause**: API v2.1 구현 시 실제 DB 스키마 무시
+- **Impact**: 백엔드 대시보드 대시보드 엔드포인트 전체 비작동
+- **Status**: ✅ Fixed and tested
+- **Files**: 3개 (database.py, main.py, ReportViewer.jsx)

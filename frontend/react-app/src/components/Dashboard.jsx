@@ -1,134 +1,336 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Container,
-  Paper,
+  Alert,
   Box,
-  TextField,
   Button,
+  Chip,
+  CircularProgress,
+  Container,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControl,
   InputLabel,
-  Select,
   MenuItem,
-  CircularProgress,
+  Paper,
+  Select,
+  Stack,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableRow,
+  TextField,
   Typography,
-  Alert,
 } from '@mui/material';
-import { generateReport, fetchCompanies, fetchTopics } from '../services/apiService';
+import AddIcon from '@mui/icons-material/Add';
+import RefreshIcon from '@mui/icons-material/Refresh';
+import {
+  fetchCompanies,
+  fetchTopics,
+  fetchReports,
+  generateReport,
+} from '../services/apiService';
 
-const Dashboard = ({ onReportStart, onJobIdChange }) => {
+const Dashboard = ({ onReportStart, onJobIdChange, onViewReport }) => {
   const [companies, setCompanies] = useState([]);
   const [topics, setTopics] = useState([]);
-  const [selectedCompany, setSelectedCompany] = useState('');
-  const [selectedTopic, setSelectedTopic] = useState('');
-  const [customTopic, setCustomTopic] = useState('');
-  const [loading, setLoading] = useState(false);
-  const [companiesLoading, setCompaniesLoading] = useState(true);
-  const [topicsLoading, setTopicsLoading] = useState(true);
+  const [reports, setReports] = useState([]);
+  const [reportsTotal, setReportsTotal] = useState(0);
+  const [filters, setFilters] = useState({ company: '', topic: '' });
+  const [reportsLoading, setReportsLoading] = useState(false);
+  const [metaLoading, setMetaLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // 기업 목록 로드
-  useEffect(() => {
-    const loadCompanies = async () => {
-      try {
-        setCompaniesLoading(true);
-        const data = await fetchCompanies();
-        setCompanies(data);
-        setError(null);
-      } catch (err) {
-        console.error('Failed to load companies:', err);
-        setError('기업 목록을 불러올 수 없습니다. 백엔드 서버가 실행 중인지 확인하세요.');
-        // Fallback 데이터
-        setCompanies(['SK하이닉스', '현대엔지니어링', 'NAVER', '삼성전자']);
-      } finally {
-        setCompaniesLoading(false);
-      }
-    };
+  const [createOpen, setCreateOpen] = useState(false);
+  const [modalCompany, setModalCompany] = useState('');
+  const [modalTopic, setModalTopic] = useState('');
+  const [modalCustomTopic, setModalCustomTopic] = useState('');
+  const [creating, setCreating] = useState(false);
 
-    loadCompanies();
+  const isCustomTopic = modalTopic === 'custom';
+
+  const loadReferenceData = async () => {
+    try {
+      setMetaLoading(true);
+      const [companiesData, topicsData] = await Promise.all([
+        fetchCompanies(),
+        fetchTopics(),
+      ]);
+      setCompanies(companiesData || []);
+      setTopics(topicsData || []);
+      if (companiesData?.length) {
+        setModalCompany(companiesData[0]);
+      }
+      if (topicsData?.length) {
+        setModalTopic(topicsData[0].id);
+      }
+      setError(null);
+    } catch (err) {
+      console.error('Failed to load reference data:', err);
+      setError('기준 데이터를 불러올 수 없습니다. 서버 상태를 확인하세요.');
+    } finally {
+      setMetaLoading(false);
+    }
+  };
+
+  const loadReports = async () => {
+    try {
+      setReportsLoading(true);
+      const params = {
+        company_name: filters.company || undefined,
+        topic: filters.topic || undefined,
+        sort_by: 'created_at',
+        order: 'desc',
+        limit: 50,
+        offset: 0,
+      };
+      const data = await fetchReports(params);
+      setReports(data?.reports || []);
+      setReportsTotal(data?.total || 0);
+      setError(null);
+    } catch (err) {
+      console.error('Failed to load reports:', err);
+      setError('리포트 목록을 불러올 수 없습니다.');
+    } finally {
+      setReportsLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadReferenceData();
   }, []);
 
-  // 주제 목록 로드
   useEffect(() => {
-    const loadTopics = async () => {
-      try {
-        setTopicsLoading(true);
-        const data = await fetchTopics();
-        setTopics(data);
-        // 첫 번째 주제를 기본값으로 설정
-        if (data && data.length > 0) {
-          setSelectedTopic(data[0].id);
-        }
-        setError(null);
-      } catch (err) {
-        console.error('Failed to load topics:', err);
-        setError('분석 주제 목록을 불러올 수 없습니다. 백엔드 서버가 실행 중인지 확인하세요.');
-      } finally {
-        setTopicsLoading(false);
-      }
-    };
+    loadReports();
+  }, [filters.company, filters.topic]);
 
-    loadTopics();
-  }, []);
+  const openCreateModal = () => {
+    setCreateOpen(true);
+    setModalCustomTopic('');
+    if (topics?.length && !modalTopic) {
+      setModalTopic(topics[0].id);
+    }
+    if (companies?.length && !modalCompany) {
+      setModalCompany(companies[0]);
+    }
+  };
 
-  // 리포트 생성 핸들러
+  const closeCreateModal = () => {
+    setCreateOpen(false);
+    setCreating(false);
+  };
+
   const handleGenerate = async () => {
-    if (!selectedCompany) {
-      setError('기업을 선택해주세요.');
+    if (!modalCompany || !modalTopic) {
+      setError('기업과 주제를 모두 선택해주세요.');
       return;
     }
 
-    // 최종 topic 결정 (custom인 경우 customTopic 사용)
-    let finalTopic = selectedTopic;
-    if (selectedTopic === 'custom' || selectedTopic === 'T07') {
-      if (!customTopic.trim()) {
+    let finalTopic = modalTopic;
+    if (isCustomTopic) {
+      if (!modalCustomTopic.trim()) {
         setError('직접 입력한 분석 주제를 입력해주세요.');
         return;
       }
-      finalTopic = customTopic;
+      finalTopic = modalCustomTopic.trim();
     } else {
-      // 선택된 topic의 label을 가져오기
-      const selectedTopicObj = topics.find(t => t.id === selectedTopic);
-      if (selectedTopicObj) {
-        finalTopic = selectedTopicObj.label;
-      }
+      const selected = topics.find((t) => t.id === modalTopic);
+      finalTopic = selected?.label || finalTopic;
     }
 
     try {
-      setLoading(true);
-      setError(null);
-      const response = await generateReport(selectedCompany, finalTopic);
-      console.log('Generate response:', response);
+      setCreating(true);
+      const response = await generateReport(modalCompany, finalTopic);
+      const optimisticRow = {
+        report_id: response?.report_id || null,
+        company_name: modalCompany,
+        topic: finalTopic,
+        model_name: response?.model_name || 'pending',
+        created_at: new Date().toISOString(),
+        status: 'processing',
+        job_id: response?.job_id,
+      };
+      setReports((prev) => [optimisticRow, ...prev]);
+      setReportsTotal((prev) => prev + 1);
 
-      // JobID를 부모로 전달
-      onJobIdChange(response.job_id);
-      onReportStart(response.job_id);
+      if (response?.job_id) {
+        onJobIdChange(response.job_id);
+        onReportStart(response.job_id);
+      }
+
+      closeCreateModal();
+      setError(null);
     } catch (err) {
       console.error('Failed to generate report:', err);
       setError('리포트 생성 요청에 실패했습니다. 다시 시도해주세요.');
     } finally {
-      setLoading(false);
+      setCreating(false);
     }
   };
 
-  const isCustomTopic = selectedTopic === 'custom' || selectedTopic === 'T07';
+  const renderStatusChip = (status) => {
+    const colorMap = {
+      completed: 'success',
+      processing: 'warning',
+      failed: 'error',
+    };
+    return (
+      <Chip
+        size="small"
+        color={colorMap[status] || 'default'}
+        label={status || 'unknown'}
+      />
+    );
+  };
 
   return (
-    <Container maxWidth="md" sx={{ py: 4 }}>
-      <Paper elevation={3} sx={{ p: 4 }}>
-        <Typography variant="h4" component="h1" gutterBottom sx={{ mb: 3, fontWeight: 'bold' }}>
-          📊 Enterprise STORM Report Generator
+    <Container maxWidth="lg" sx={{ py: 4 }}>
+      <Paper elevation={3} sx={{ p: 3 }}>
+        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 3 }}>
+          <Box>
+            <Typography variant="h4" sx={{ fontWeight: 'bold' }}>
+              📊 Enterprise STORM Dashboard
+            </Typography>
+            <Typography variant="body2" color="textSecondary">
+              생성된 리포트를 테이블로 관리하고 새 리포트를 생성하세요.
+            </Typography>
+          </Box>
+          <Stack direction="row" spacing={1}>
+            <Button
+              startIcon={<RefreshIcon />}
+              variant="outlined"
+              onClick={loadReports}
+              disabled={reportsLoading}
+            >
+              새로고침
+            </Button>
+            <Button
+              startIcon={<AddIcon />}
+              variant="contained"
+              onClick={openCreateModal}
+              disabled={metaLoading}
+            >
+              새 리포트 생성
+            </Button>
+          </Stack>
+        </Box>
+
+        {error && (
+          <Alert severity="error" sx={{ mb: 2 }}>
+            {error}
+          </Alert>
+        )}
+
+        <Box sx={{ display: 'flex', gap: 2, mb: 2, flexWrap: 'wrap' }}>
+          <FormControl sx={{ minWidth: 200 }} size="small">
+            <InputLabel>기업 필터</InputLabel>
+            <Select
+              label="기업 필터"
+              value={filters.company}
+              onChange={(e) => setFilters((f) => ({ ...f, company: e.target.value }))}
+            >
+              <MenuItem value="">전체</MenuItem>
+              {companies.map((company) => (
+                <MenuItem key={company} value={company}>
+                  {company}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+
+          <FormControl sx={{ minWidth: 220 }} size="small">
+            <InputLabel>주제 필터</InputLabel>
+            <Select
+              label="주제 필터"
+              value={filters.topic}
+              onChange={(e) => setFilters((f) => ({ ...f, topic: e.target.value }))}
+            >
+              <MenuItem value="">전체</MenuItem>
+              {topics.map((topic) => (
+                <MenuItem key={topic.id} value={topic.label}>
+                  {topic.label}
+                </MenuItem>
+              ))}
+            </Select>
+          </FormControl>
+        </Box>
+
+        <Paper variant="outlined" sx={{ width: '100%', overflowX: 'auto' }}>
+          <Table size="small">
+            <TableHead>
+              <TableRow>
+                <TableCell>ID</TableCell>
+                <TableCell>기업명</TableCell>
+                <TableCell>분석 주제</TableCell>
+                <TableCell>모델</TableCell>
+                <TableCell>생성 일시</TableCell>
+                <TableCell>상태</TableCell>
+                <TableCell align="right">Action</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {reportsLoading ? (
+                <TableRow>
+                  <TableCell colSpan={7} align="center">
+                    <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 1 }}>
+                      <CircularProgress size={20} />
+                      <Typography variant="body2">리포트를 불러오는 중...</Typography>
+                    </Box>
+                  </TableCell>
+                </TableRow>
+              ) : reports.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={7} align="center">
+                    <Typography variant="body2">표시할 리포트가 없습니다.</Typography>
+                  </TableCell>
+                </TableRow>
+              ) : (
+                reports.map((row) => (
+                  <TableRow key={`${row.report_id || 'pending'}-${row.company_name}-${row.topic}`} hover>
+                    <TableCell>{row.report_id || '—'}</TableCell>
+                    <TableCell>{row.company_name}</TableCell>
+                    <TableCell>{row.topic}</TableCell>
+                    <TableCell>{row.model_name || '—'}</TableCell>
+                    <TableCell>
+                      {row.created_at
+                        ? new Date(row.created_at).toLocaleString('ko-KR')
+                        : '—'}
+                    </TableCell>
+                    <TableCell>{renderStatusChip(row.status)}</TableCell>
+                    <TableCell align="right">
+                      <Button
+                        size="small"
+                        variant="outlined"
+                        disabled={!row.report_id}
+                        onClick={() => onViewReport && onViewReport(row.report_id)}
+                      >
+                        보기
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </Paper>
+
+        <Typography variant="caption" sx={{ mt: 1, display: 'block' }}>
+          총 {reportsTotal}건
         </Typography>
+      </Paper>
 
-        {error && <Alert severity="error" sx={{ mb: 2 }}>{error}</Alert>}
-
-        <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
-          {/* 기업 선택 */}
-          <FormControl fullWidth disabled={companiesLoading}>
+      {/* 생성 모달 */}
+      <Dialog open={createOpen} onClose={closeCreateModal} fullWidth maxWidth="sm">
+        <DialogTitle>새 리포트 생성</DialogTitle>
+        <DialogContent sx={{ display: 'flex', flexDirection: 'column', gap: 2, pt: 2 }}>
+          <FormControl fullWidth disabled={metaLoading}>
             <InputLabel>기업 선택</InputLabel>
             <Select
-              value={selectedCompany}
-              onChange={(e) => setSelectedCompany(e.target.value)}
               label="기업 선택"
+              value={modalCompany}
+              onChange={(e) => setModalCompany(e.target.value)}
             >
               {companies.map((company) => (
                 <MenuItem key={company} value={company}>
@@ -138,13 +340,12 @@ const Dashboard = ({ onReportStart, onJobIdChange }) => {
             </Select>
           </FormControl>
 
-          {/* 분석 주제 선택 */}
-          <FormControl fullWidth disabled={topicsLoading}>
+          <FormControl fullWidth disabled={metaLoading}>
             <InputLabel>분석 주제</InputLabel>
             <Select
-              value={selectedTopic}
-              onChange={(e) => setSelectedTopic(e.target.value)}
               label="분석 주제"
+              value={modalTopic}
+              onChange={(e) => setModalTopic(e.target.value)}
             >
               {topics.map((topic) => (
                 <MenuItem key={topic.id} value={topic.id}>
@@ -154,69 +355,29 @@ const Dashboard = ({ onReportStart, onJobIdChange }) => {
             </Select>
           </FormControl>
 
-          {/* 직접 입력 필드 (custom 주제 선택 시에만 표시) */}
           {isCustomTopic && (
             <TextField
               label="분석 주제 직접 입력"
-              value={customTopic}
-              onChange={(e) => setCustomTopic(e.target.value)}
+              value={modalCustomTopic}
+              onChange={(e) => setModalCustomTopic(e.target.value)}
               fullWidth
               multiline
               rows={2}
-              placeholder="예: 반도체 시장 분석, 글로벌 확장 전략"
+              placeholder="예: 재무 분석, 글로벌 확장 전략"
             />
           )}
-
-          {/* 선택된 주제 미리보기 */}
-          {!isCustomTopic && selectedTopic && (
-            <Box sx={{
-              p: 2,
-              backgroundColor: '#f5f5f5',
-              borderRadius: '4px',
-              border: '1px solid #ddd'
-            }}>
-              <Typography variant="caption" color="textSecondary">
-                선택된 분석 주제:
-              </Typography>
-              <Typography variant="body2" sx={{ mt: 0.5 }}>
-                {topics.find(t => t.id === selectedTopic)?.label || '주제 선택 대기'}
-              </Typography>
-            </Box>
-          )}
-
-          {/* 생성 버튼 */}
+        </DialogContent>
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={closeCreateModal} disabled={creating}>취소</Button>
           <Button
             variant="contained"
-            size="large"
             onClick={handleGenerate}
-            disabled={loading || companiesLoading || topicsLoading || !selectedCompany || !selectedTopic}
-            sx={{
-              py: 1.5,
-              backgroundColor: '#1976d2',
-              '&:hover': { backgroundColor: '#1565c0' },
-              fontSize: '1.1rem',
-            }}
+            disabled={creating || !modalCompany || !modalTopic}
           >
-            {loading ? (
-              <>
-                <CircularProgress size={24} sx={{ mr: 2, color: 'white' }} />
-                생성 중...
-              </>
-            ) : (
-              '📄 리포트 생성'
-            )}
+            {creating ? <CircularProgress size={20} sx={{ color: 'white' }} /> : '생성'}
           </Button>
-
-          {(companiesLoading || topicsLoading) && (
-            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
-              <CircularProgress size={20} />
-              <Typography>
-                {companiesLoading ? '기업 목록을 불러오는 중...' : '분석 주제를 불러오는 중...'}
-              </Typography>
-            </Box>
-          )}
-        </Box>
-      </Paper>
+        </DialogActions>
+      </Dialog>
     </Container>
   );
 };
