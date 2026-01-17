@@ -14,23 +14,17 @@ import ReactMarkdown from 'react-markdown';
 import { getJobStatus, getReport } from '../services/apiService';
 import '../styles/ReportViewer.css';
 
-const ReportViewer = ({ jobId, reportId, onBack }) => {
+const ReportViewer = ({ jobId, onBack }) => {
   const [status, setStatus] = useState('processing');
-  const [activeReportId, setActiveReportId] = useState(reportId || null);
+  const [reportId, setReportId] = useState(null);
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [pollingCount, setPollingCount] = useState(0);
 
-  useEffect(() => {
-    if (reportId) {
-      setActiveReportId(reportId);
-    }
-  }, [reportId]);
-
   // 상태 폴링 (3초 간격)
   useEffect(() => {
-    if (!jobId || activeReportId) return;
+    if (!jobId) return;
 
     const checkStatus = async () => {
       try {
@@ -38,9 +32,13 @@ const ReportViewer = ({ jobId, reportId, onBack }) => {
         console.log('Status:', statusData);
         setStatus(statusData.status);
 
-        if (statusData.status === 'completed' && statusData.report_id) {
-          setActiveReportId(statusData.report_id);
-          setStatus(statusData.status);
+        if (statusData.status === 'completed' && statusData.message) {
+          // message에서 result_id 추출 (예: "/api/report/1 로 조회하세요." → 1)
+          const match = statusData.message.match(/\/api\/report\/(\d+)/);
+          if (match) {
+            const id = parseInt(match[1], 10);
+            setReportId(id);
+          }
         }
       } catch (err) {
         console.error('Failed to check status:', err);
@@ -55,16 +53,16 @@ const ReportViewer = ({ jobId, reportId, onBack }) => {
     }, 3000);
 
     return () => clearInterval(interval);
-  }, [jobId, activeReportId]);
+  }, [jobId]);
 
   // 리포트 조회 (완료 후)
   useEffect(() => {
-    if (!activeReportId) return;
+    if (!reportId) return;
 
     const fetchReportData = async () => {
       try {
         setLoading(true);
-        const reportData = await getReport(activeReportId);
+        const reportData = await getReport(reportId);
         console.log('Report:', reportData);
         setReport(reportData);
         setError(null);
@@ -77,7 +75,7 @@ const ReportViewer = ({ jobId, reportId, onBack }) => {
     };
 
     fetchReportData();
-  }, [activeReportId]);
+  }, [reportId]);
 
   // 처리 중 UI
   if (status === 'processing' && !report) {
@@ -291,7 +289,7 @@ const ReportViewer = ({ jobId, reportId, onBack }) => {
           )}
 
           {/* 메타정보 (있으면 표시) */}
-          {/* {report.meta_info && (
+          {report.meta_info && (
             <>
               <Divider sx={{ my: 3 }} />
               <Typography variant="h6" sx={{ fontWeight: 'bold', mb: 2 }}>
@@ -306,35 +304,6 @@ const ReportViewer = ({ jobId, reportId, onBack }) => {
               }}>
                 {JSON.stringify(report.meta_info, null, 2)}
               </Typography>
-            </>
-          )} */}
-
-          {/* 참고 문헌 (url_to_info 형식) */}
-          {report.references && typeof report.references === 'object' && report.references.url_to_info && (
-            <>
-              <Divider sx={{ my: 3 }} />
-              <Typography variant="h6" sx={{ fontWeight: 'bold', mb: 2 }}>
-                📚 참고 문헌
-              </Typography>
-              <Box component="ul" sx={{ pl: 2, m: 0 }}>
-                {Object.entries(report.references.url_to_info).map(([url, info], idx) => (
-                  <Box key={`${url}-${idx}`} component="li" sx={{ mb: 1.5 }}>
-                    <Typography variant="subtitle2" sx={{ fontWeight: 'bold' }}>
-                      {info.title || url}
-                    </Typography>
-                    {info.snippet && (
-                      <Typography variant="body2" sx={{ mt: 0.5, color: 'text.secondary' }}>
-                        {info.snippet}
-                      </Typography>
-                    )}
-                    {url && (
-                      <Typography variant="caption" color="textSecondary" sx={{ display: 'block', mt: 0.5 }}>
-                        URL: {url}
-                      </Typography>
-                    )}
-                  </Box>
-                ))}
-              </Box>
             </>
           )}
         </Paper>

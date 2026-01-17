@@ -245,82 +245,17 @@ def test_postgres_rm_query_routing():
 
 ## Documentation Strategy
 
-**Two-file system for code quality & learning:**
-
-### 1. [.github/CRITICAL_FIXES.md](.github/CRITICAL_FIXES.md) - Production Bug Tracking
-**Purpose**: Record P0/P1 bugs that were deployed/fixed  
-**Audience**: Team leads, QA, deployment managers  
-**Content**:
-- Problem statement (clear description + code example)
-- Root cause analysis
-- Fix implementation
-- Verification steps
-- Approval log (who identified, fixed, verified, commit hash)
-
-**When to add**:
-- ✅ Bugs that broke production or caused data loss
-- ✅ Schema mismatches between DB and code
-- ✅ API/Response format errors
-- ❌ Minor warnings or refactoring notes
-
-**Example P1 Issues**:
-- API 필드명 오류 (id → report_id)
-- DB 컬럼 존재하지 않음 (status ❌)
-- 타입 검증 실패 (List vs Dict)
-
----
-
-### 2. [CLAUDE.md](CLAUDE.md) - Learning & Architecture Rules
-**Purpose**: AI agent learns patterns and prevents future mistakes  
-**Audience**: AI coding agent (future context)  
-**Content**:
-- Error analysis + root cause
-- Lessons learned (규칙 추가)
-- Architectural constraints
-- Completed tasks checklist
-
-**When to add**:
-- ✅ Module naming conflicts
-- ✅ API response format issues
-- ✅ File I/O encoding problems
-- ✅ Configuration management patterns
-- ❌ Already-documented P0/P1 bugs (go to CRITICAL_FIXES.md instead)
-
-**Pattern**:
-```markdown
-### [Date] Error Category
-
-**오류 상황**: What went wrong
-**원인**: Root cause analysis
-**해결 방안**: How it was fixed
-**교훈**: Rules to prevent future mistakes
-```
-
----
-
-### Integration Rule
-```
-New bug discovery:
-  ↓
-Does it affect production?
-  ├─ YES (P0/P1) → .github/CRITICAL_FIXES.md (먼저!)
-  │                 + 추가로 CLAUDE.md에 규칙 기록
-  └─ NO (P2/P3) → CLAUDE.md (패턴/규칙 학습)
-```
-
----
-
 When implementing new features:
-1. Fix bugs first → document in [CRITICAL_FIXES.md](.github/CRITICAL_FIXES.md)
-2. Record learning patterns in [CLAUDE.md](CLAUDE.md)
-3. Create feature report in `docs/FEAT-XXX-*.md` (executive summary)
-4. Update relevant instruction files (`.github/instructions/*.instructions.md`)
-5. Write verification test in `verify/verify_*.py`
+1. Add technical details to [CLAUDE.md](CLAUDE.md) (error log format)
+2. Create feature report in `docs/FEAT-XXX-*.md` (executive summary)
+3. Update relevant instruction files (`.github/instructions/*.instructions.md`)
+4. Write verification test in `verify/verify_*.py`
+5. **[NEW]** Document critical bugs in [.github/CRITICAL_FIXES.md](.github/CRITICAL_FIXES.md)
 
 ---
 
 **Need more context?** Check:
-- [.github/CRITICAL_FIXES.md](.github/CRITICAL_FIXES.md) - P0/P1 production bugs (정적)
-- [CLAUDE.md](CLAUDE.md) - Error patterns & learning rules (동적)
+- [CLAUDE.md](CLAUDE.md) - Error history and solutions
+- [.github/CRITICAL_FIXES.md](.github/CRITICAL_FIXES.md) - P0/P1 bug fixes
 - [docs/](docs/) - Feature implementation reports
 - [.github/instructions/](instructions/) - Domain-specific rules

@@ -3,69 +3,6 @@
 
 ---
 
-## 📋 핵심 정리
-
-### 문서 구조
-- **[.github/CRITICAL_FIXES.md](.github/CRITICAL_FIXES.md)**: P0/P1 배포 버그 기록 (정적, 팀 공유용)
-- **[CLAUDE.md](CLAUDE.md)**: 학습 패턴 & 규칙 (동적, AI 에이전트 학습용)
-
-### 핵심 규칙 (중앙 집중식)
-
-#### 1. **파일 I/O (Windows 호환성)**
-```python
-# ❌ WRONG - Windows에서 한글 깨짐
-with open(path, "w") as f:
-    f.write(content)
-
-# ✅ CORRECT - UTF-8 명시
-with open(path, "w", encoding="utf-8") as f:
-    f.write(content)
-```
-
-#### 2. **DB 스키마 확인 필수**
-- 모든 쿼리 작성 전 `python -m backend.check_schema` 실행
-- JSON/JSONB 필드는 `->>` 연산자로 추출 (텍스트 타입 반환)
-- 타입 캐스팅 필수: `(value)::boolean`, `(value)::integer`
-
-#### 3. **모듈명 충돌 회피**
-- `package/module.py` 파일이 있으면 `package/module/` 폴더 생성 금지
-- 프리픽스 변경: `utils/` → `db/`, `connectors/` 등
-
-#### 4. **Error Handling - Fail Fast**
-```python
-# ❌ WRONG - 조용히 스킵 (데이터 유실)
-for item in items:
-    if process(item):
-        count += 1
-
-# ✅ CORRECT - 즉시 예외 전파
-for item in items:
-    if not process(item):
-        raise Exception(f"Failed: {item}")
-    count += 1
-```
-
-#### 5. **API 모델 정의 = DB 스키마 우선 확인**
-- Mock 데이터 생성 금지
-- Pydantic 모델의 타입 = 실제 DB 데이터 타입과 일치 필수
-- JSONB는 `Dict[str, Any]`, 리스트가 아님
-
-#### 6. **외부 API 모델명 정규화**
-- Google Gemini: `models/` 접두사 필수
-- 모델명에 접두사 없으면 자동 추가
-
-#### 7. **Vector Search의 한계**
-- 임베딩 유사도만으로는 문서 출처를 구분할 수 없음
-- Entity Bias 방지 필요 (Post-Processing)
-- Table Bias 존재 (LLM이 구조화 데이터 선호)
-
-#### 8. **설정은 중앙 관리**
-- `src/common/config.py`: 모든 설정의 SSOT (Single Source of Truth)
-- `backend/config.py` ❌ → `src/common/config.py` ✅
-- COMPANY_ALIASES, TOPICS, DB_CONFIG 등은 한 곳에서만 정의
-
----
-
 ## 오류 기록
 
 ### [2026-01-08] Task 001: 모듈 경로 충돌 오류
@@ -112,14 +49,28 @@ for item in items:
 1. **외부 API 모델명 형식 확인**: API 버전에 따라 모델명 형식이 다를 수 있음
 2. **방어적 코딩**: 모델명 정규화 로직을 추가하여 다양한 입력 형식 지원
 
-### ⚠️ [참고] API v2.1 스키마 오류 (2026-01-17)
+### [2026-01-16] ReportResponse references_data 타입 오류
 
-**📍 기록 위치 변경**: 이 오류는 CRITICAL_FIXES.md로 이동했습니다.
-- **P1 오류**: Companies.name 미존재, Generated_Reports.status 미존재, references 타입 오류
-- **영향도**: 백엔드 대시보드 API 전체 비작동
-- **문서**: [.github/CRITICAL_FIXES.md - Section 3](.github/CRITICAL_FIXES.md#3-api-v21-schema-mismatch-fixes-p1)
+**오류 상황:**
+```
+1 validation error for ReportResponse
+references_data
+  Input should be a valid list [type=list_type, input_value={'url_to_info': {...}}, input_type=dict]
+```
 
-**학습 점**: DB 스키마 확인 → Pydantic 모델 정의 순서 필수
+**원인:**
+- ReportResponse 모델에서 `references_data: Optional[List[Dict[str, Any]]]`로 정의
+- 실제 DB (Generated_Reports)의 references_data JSONB는 `{'url_to_info': {...}}` 형식 (dict)
+- Pydantic validation 실패
+
+**해결 방안:**
+- ReportResponse.references_data를 `Optional[Dict[str, Any]]`로 변경
+- DB의 실제 JSONB 형식에 맞추기
+
+**교훈 (규칙 추가):**
+1. **DB 스키마 먼저 확인**: 테이블 구조를 확인 후 Pydantic 모델 정의
+2. **Mock 데이터 생성 금지**: 실제 DB에 테스트 데이터 임의 삽입 금지
+3. **JSONB 타입 명확화**: JSONB 필드의 형식을 사전에 파악 필요
 
 ### [2026-01-16] Topic 정규화 및 설정 중앙화
 
@@ -134,23 +85,73 @@ for item in items:
 3. 주제 목록이 고정되어 있지 않아 분류 불가능
 
 **해결 방안:**
+1. `backend/config.py` 생성:
+   - TOPICS 리스트 (Key-Value 형식)
+   - id: 고유 식별자 (T01, T02, ..., custom)
+   - label: UI 표시명
+   - description: 주제 설명
+
+2. Backend API 개선:
+   - GET /api/topics 엔드포인트 추가
+   - POST /api/generate 데이터 정제 로직 추가
+     - DB 저장: topic에 순수 주제만 저장
+     - LLM 쿼리: 내부 변수로 f"{company_name} {topic}" 구성
+
+### [2026-01-16] Topic 정규화 및 설정 중앙화 - 파일 위치 수정
+
+**오류 상황:**
+- Topic 컬럼에 "{기업명} {분석 주제}"가 묶여 저장되어 같은 주제로 Grouping이 불가능
+- Main.py에 주제 목록이 하드코딩되어 있어 유지보수 어려움
+- Frontend에서 자유로운 텍스트 입력만 가능하여 데이터 일관성 부족
+
+**원인:**
+1. Backend 로직에서 company_name과 topic을 합쳐서 DB 저장
+2. 설정이 분산되어 있어 중앙 관리 불가능
+3. 주제 목록이 고정되어 있지 않아 분류 불가능
+
+**해결 방안:**
 1. **src/common/config.py에 TOPICS 정의** (모든 설정의 단일 진실 공급원 SSOT)
    - TOPICS 리스트 (Key-Value 형식)
-   - id, label, value 필드
-   - 함수: `get_topic_value_by_id()`, `get_topic_list_for_api()`
+   - id: 고유 식별자 (T01, T02, ..., custom)
+   - label: UI 표시명  
+   - value: DB/LLM에 전달될 순수한 주제
+   - 함수: get_topic_value_by_id(), get_topic_list_for_api()
 
-2. **Backend API 개선**
-   - GET /api/topics 엔드포인트
-   - POST /api/generate 데이터 정제 로직
+2. **Backend API 개선** (backend/main.py)
+   - src.common.config에서 TOPICS 임포트
+   - GET /api/topics에서 get_topic_list_for_api() 사용
 
-3. **DB 저장 로직 분리**
-   - DB 저장: `topic`에는 순수 주제만 저장
-   - LLM 호출: 내부에서 `f"{company_name} {topic}"` 구성
+3. **DB 저장 로직 분리** (scripts/run_storm.py - CRITICAL)
+   - _extract_pure_topic() 함수 추가
+   - save_report_to_db()에서 company_name과 pure_topic 분리
+   - DB 저장: pure_topic만 저장 (기업명 제거)
+   - LLM 질의: 내부에서 f"{company_name} {pure_topic}" 구성
+
+4. **Frontend Dashboard 개선**
+   - Topics SELECT BOX 추가
+   - custom 주제 선택 시 텍스트 입력 필드 활성화
+   - 선택된 주제 미리보기
+
+**구현 내용:**
+- src/common/config.py: TOPICS 정의, 헬퍼 함수
+- backend/main.py: GET /api/topics 수정, 임포트 경로 변경
+- scripts/run_storm.py: _extract_pure_topic(), save_report_to_db() 개선
+- backend/config.py: 삭제 (잘못된 위치)
+- frontend/.../Dashboard.jsx: Topic SELECT BOX, 직접 입력 필드 추가
+- frontend/.../apiService.js: fetchTopics() 함수 추가
+
+**결과 (DB 저장 형식):**
+```
+Generated_Reports.topic = "기업 개요"          (순수 주제만)
+Generated_Reports.company_name = "삼성전자"     (별도 관리)
+LLM 쿼리 = "삼성전자 기업 개요"                (내부 구성)
+```
 
 **교훈 (규칙 추가):**
-1. **설정 위치 명확화**: `src/common/config.py`는 모든 설정의 중앙저장소
+1. **설정 위치 명확화**: src/common/config.py는 모든 설정의 중앙저장소
 2. **데이터 정제 분리**: 저장(순수 topic) ≠ 사용(company + topic)
 3. **DB FK 설계**: company_name과 topic은 독립적인 칼럼으로 관리
+4. **파일 위치 규칙**: backend/config.py ❌ → src/common/config.py ✅
 
 ### [2026-01-10] Gemini 응답 `list index out of range` 오류
 
