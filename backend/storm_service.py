@@ -36,6 +36,8 @@ import os
 import sys
 import logging
 import json
+import glob
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -53,8 +55,9 @@ from knowledge_storm.utils import load_api_key
 
 from src.common.config import extract_companies_from_query
 from backend.database import get_db_cursor, get_db_connection
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, Json
 import psycopg2
+import psycopg2.extras
 
 # 로깅 설정
 logging.basicConfig(
@@ -65,19 +68,40 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """
+    Rate Limit 에러 또는 API 빈 응답으로 인한 IndexError를 감지합니다.
+    
+    dspy 라이브러리가 빈 completions 리스트를 받으면 IndexError가 발생하는데,
+    이는 보통 Rate Limit(429)로 인한 빈 응답 때문입니다.
+    """
+    msg = str(exc).lower()
+    return (
+        "rate limit" in msg
+        or "429" in msg
+        or "please try again" in msg
+        or "list index out of range" in msg  # dspy가 빈 응답을 받을 때
+        or isinstance(exc, IndexError)       # IndexError 타입 직접 감지
+    )
+
+
 # ============================================================
 # Post-Processing Bridge Functions (FIX-Core-002)
 # ============================================================
 # 라이브러리(run())는 '작가'일 뿐, 원고를 서고(DB)에 꽂는 것은 '사서(Developer)'가 직접 해야 합니다.
 
-def _find_report_file(output_dir: str) -> str | None:
+def _find_report_file(output_dir: str, max_retries: int = 10) -> str | None:
     """
-    임시 폴더에서 생성된 마크다운 리포트 파일을 찾습니다.
+    임시 폴더에서 생성된 리포트 파일을 **결정론적(Deterministic)**으로 찾습니다.
     
-    패턴: storm_gen_article_polished.txt 또는 storm_gen_article.txt
+    전략: "격리 후 전수 조사 (Isolate & Capture)"
+    1. 파일명을 추측하지 않음
+    2. Glob으로 .txt 패턴 전수 조사
+    3. Retry 로직으로 파일 시스템 지연 대응
     
     Args:
         output_dir: runner가 작업한 임시 폴더 (예: ./results/temp/job-xyz)
+        max_retries: 최대 재시도 횟수 (기본값: 10초)
     
     Returns:
         파일 경로 (문자열) 또는 None
@@ -87,23 +111,60 @@ def _find_report_file(output_dir: str) -> str | None:
         # → "./results/temp/job-abc123/storm_gen_article_polished.txt"
     """
     if not os.path.exists(output_dir):
-        logger.warning(f"Output directory not found: {output_dir}")
+        logger.error(f"Output directory not found: {output_dir}")
         return None
     
-    # 순서대로 찾기
-    candidates = [
-        "storm_gen_article_polished.txt",
-        "storm_gen_article.txt",
-    ]
+    logger.info(f"Searching for report file in: {output_dir}")
     
-    for filename in candidates:
-        file_path = os.path.join(output_dir, filename)
-        if os.path.exists(file_path):
-            logger.info(f"✓ Found report file: {filename}")
-            return file_path
+    # ============================================================
+    # Retry 로직: 파일 시스템 쓰기 지연 대응 (최대 10초)
+    # ============================================================
+    target_file = None
     
-    logger.warning(f"No report file found in: {output_dir}")
-    return None
+    for attempt in range(max_retries):
+        # 1. Glob으로 모든 .txt 파일 탐색 (recursive)
+        all_txt_files = glob.glob(os.path.join(output_dir, "**/*.txt"), recursive=True)
+        
+        if not all_txt_files:
+            logger.debug(f"  [{attempt+1}/{max_retries}] No .txt files found yet, waiting...")
+            time.sleep(1)
+            continue
+        
+        # 2. 우선순위: "article" 또는 "polished" 키워드 포함
+        priority_keywords = ["polished", "article"]
+        candidates = []
+        
+        for keyword in priority_keywords:
+            matches = [f for f in all_txt_files if keyword in os.path.basename(f).lower()]
+            if matches:
+                candidates.extend(matches)
+        
+        # 3. 후보가 없으면 가장 큰 파일 선택 (보통 최종 리포트가 가장 큼)
+        if not candidates:
+            candidates = sorted(all_txt_files, key=lambda f: os.path.getsize(f), reverse=True)
+        
+        # 4. 첫 번째 후보 선택
+        if candidates:
+            target_file = candidates[0]
+            logger.info(f"✓ Found report file: {os.path.basename(target_file)} (attempt {attempt+1})")
+            break
+        
+        time.sleep(1)
+    
+    # ============================================================
+    # 디버깅: 파일을 찾지 못한 경우 폴더 내용 출력
+    # ============================================================
+    if not target_file:
+        try:
+            all_files = os.listdir(output_dir)
+            logger.error(f"❌ Report file not found after {max_retries} retries")
+            logger.error(f"   Directory: {output_dir}")
+            logger.error(f"   Existing files: {all_files}")
+        except Exception as e:
+            logger.error(f"❌ Failed to list directory: {e}")
+        return None
+    
+    return target_file
 
 
 def _read_report_content(file_path: str) -> str | None:
@@ -147,17 +208,27 @@ def _save_report_to_db(
     company_name: str,
     topic: str,
     report_content: str,
+    toc_text: str | None = None,
+    references_data: dict | None = None,
+    conversation_log: dict | None = None,
+    meta_info: dict | None = None,
     model_name: str = "gpt-4o"
 ) -> int | None:
     """
-    리포트를 DB의 Generated_Reports 테이블에 저장합니다.
+    리포트를 DB의 Generated_Reports 테이블에 **모든 컬럼**을 포함하여 저장합니다.
     
     ✅ RETURNING id 구문으로 즉시 primary key 획득
+    ✅ company_id 자동 조회 (Companies 테이블에서)
+    ✅ JSONB 컬럼 저장 (references_data, conversation_log, meta_info)
     
     Args:
         company_name: 기업명 (예: "삼성전자")
         topic: 순수 주제 (기업명 제거됨, 예: "기업 개요")
         report_content: 마크다운 리포트 내용
+        toc_text: 목차(Table of Contents) 텍스트 (선택)
+        references_data: 참조 정보 딕셔너리 (url_to_info.json)
+        conversation_log: 대화 로그 딕셔너리
+        meta_info: 메타 정보 딕셔너리 (실행 설정 등)
         model_name: 사용된 LLM 모델명 (기본값: gpt-4o)
     
     Returns:
@@ -168,6 +239,8 @@ def _save_report_to_db(
             company_name="삼성전자",
             topic="기업 개요",
             report_content="# 삼성전자 기업 개요\n...",
+            toc_text="1. 개요\n2. 사업내용",
+            references_data={...},
             model_name="gpt-4o"
         )
         # → 42 (생성된 ID)
@@ -176,15 +249,47 @@ def _save_report_to_db(
         conn = get_db_connection()
         cur = conn.cursor(cursor_factory=RealDictCursor)
         
-        # INSERT + RETURNING id (PostgreSQL 문법)
+        # ============================================================
+        # Step 1: company_id 조회 (Companies 테이블에서)
+        # ============================================================
+        company_id = None
+        try:
+            cur.execute(
+                'SELECT id FROM "Companies" WHERE company_name = %s',
+                (company_name,)
+            )
+            result = cur.fetchone()
+            if result:
+                company_id = result['id']
+                logger.info(f"✓ Found company_id: {company_id} for '{company_name}'")
+            else:
+                logger.warning(f"⚠️  Company '{company_name}' not found in Companies table")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to query company_id: {e}")
+        
+        # ============================================================
+        # Step 2: INSERT with all columns + RETURNING id
+        # ============================================================
         sql = """
             INSERT INTO "Generated_Reports" 
-            (company_name, topic, report_content, model_name, created_at)
-            VALUES (%s, %s, %s, %s, NOW())
+            (company_name, company_id, topic, report_content, toc_text, 
+             references_data, conversation_log, meta_info, model_name, created_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())
             RETURNING id
         """
         
-        cur.execute(sql, (company_name, topic, report_content, model_name))
+        cur.execute(sql, (
+            company_name,
+            company_id,
+            topic,
+            report_content,
+            toc_text,
+            Json(references_data) if references_data else None,
+            Json(conversation_log) if conversation_log else None,
+            Json(meta_info) if meta_info else None,
+            model_name
+        ))
+        
         result = cur.fetchone()
         report_id = result['id'] if result else None
         
@@ -193,6 +298,12 @@ def _save_report_to_db(
         conn.close()
         
         logger.info(f"✓ Saved to DB - Report ID: {report_id}")
+        logger.info(f"  - company_id: {company_id}")
+        logger.info(f"  - toc_text: {'Yes' if toc_text else 'No'}")
+        logger.info(f"  - references_data: {'Yes' if references_data else 'No'}")
+        logger.info(f"  - conversation_log: {'Yes' if conversation_log else 'No'}")
+        logger.info(f"  - meta_info: {'Yes' if meta_info else 'No'}")
+        
         return report_id
         
     except psycopg2.Error as e:
@@ -252,9 +363,79 @@ def _load_and_save_report_bridge(
         return None
     
     # ============================================================
-    # Step 3: Save to DB - INSERT with RETURNING id
+    # Step 2.5: Read Additional Files (TOC, References, Logs)
     # ============================================================
-    report_id = _save_report_to_db(company_name, topic, report_content, model_name)
+    # TOC (Table of Contents)
+    toc_text = None
+    toc_file = os.path.join(output_dir, "storm_gen_outline.txt")
+    logger.info(f"Looking for TOC file: {toc_file}")
+    if os.path.exists(toc_file):
+        try:
+            with open(toc_file, "r", encoding="utf-8") as f:
+                toc_text = f.read()
+            logger.info(f"✓ Read TOC file ({len(toc_text)} bytes)")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to read TOC: {e}")
+    else:
+        logger.warning(f"⚠️  TOC file not found: {toc_file}")
+    
+    # References Data (url_to_info.json)
+    references_data = None
+    ref_file = os.path.join(output_dir, "url_to_info.json")
+    logger.info(f"Looking for references file: {ref_file}")
+    if os.path.exists(ref_file):
+        try:
+            with open(ref_file, "r", encoding="utf-8") as f:
+                references_data = json.load(f)
+            logger.info(f"✓ Read references data ({len(references_data)} items)")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to read references: {e}")
+    else:
+        logger.warning(f"⚠️  References file not found: {ref_file}")
+    
+    # Conversation Log (conversation_log.json)
+    conversation_log = None
+    conv_file = os.path.join(output_dir, "conversation_log.json")
+    logger.info(f"Looking for conversation log: {conv_file}")
+    if os.path.exists(conv_file):
+        try:
+            with open(conv_file, "r", encoding="utf-8") as f:
+                conversation_log = json.load(f)
+            logger.info(f"✓ Read conversation log")
+        except Exception as e:
+            logger.warning(f"⚠️  Failed to read conversation log: {e}")
+    else:
+        logger.warning(f"⚠️  Conversation log not found: {conv_file}")
+    
+    # 디버깅: 폴더 내 모든 파일 출력
+    try:
+        all_files = os.listdir(output_dir)
+        logger.info(f"📁 Files in output_dir: {all_files}")
+    except Exception as e:
+        logger.warning(f"Failed to list directory: {e}")
+    
+    # Meta Info (run configuration)
+    meta_info = {
+        "output_dir": output_dir,
+        "job_id": job_id,
+        "timestamp": datetime.now().isoformat(),
+        "model_name": model_name
+    }
+    
+    # ============================================================
+    # Step 3: Save to DB - INSERT with ALL columns + RETURNING id
+    # ============================================================
+    report_id = _save_report_to_db(
+        company_name=company_name,
+        topic=topic,
+        report_content=report_content,
+        toc_text=toc_text,
+        references_data=references_data,
+        conversation_log=conversation_log,
+        meta_info=meta_info,
+        model_name=model_name
+    )
+    
     if report_id is None:
         logger.error(f"❌ Failed to save report to DB")
         jobs_dict[job_id]["message"] = "DB 저장 중 오류가 발생했습니다."
@@ -270,6 +451,7 @@ def _load_and_save_report_bridge(
     return report_id
 
 
+def _setup_lm_configs(model_provider: str = "openai") -> STORMWikiLMConfigs:
     """
     LLM Configuration 설정
     
@@ -331,10 +513,10 @@ def _load_and_save_report_bridge(
             model=gpt_4_model_name, max_tokens=400, **openai_kwargs
         )
         article_gen_lm = OpenAIModel(
-            model=gpt_4_model_name, max_tokens=700, **openai_kwargs
+            model=gpt_35_model_name, max_tokens=3000, **openai_kwargs  # 700 → 3000, 여기서 30k tpm 한도를 100% 초과한다고 함. mini는 한도가 넉넉하다고 한다. (한글 생성 충분)
         )
         article_polish_lm = OpenAIModel(
-            model=gpt_4_model_name, max_tokens=4000, **openai_kwargs
+            model=gpt_4_model_name, max_tokens=4000, **openai_kwargs  # 누락되었던 큰 값 추가
         )
 
         logger.info(f"✓ Using OpenAI models: {gpt_35_model_name} (fast), {gpt_4_model_name} (pro)")
@@ -436,19 +618,36 @@ def run_storm_pipeline(
         # ============================================================
         jobs_dict[job_id]["progress"] = 40
         
-        # 임시 저장소 (나중에 타임스탬프 기반으로 변경 가능)
-        output_dir = f"./results/temp/{job_id}"
+        # 격리된 임시 저장소 (Clean Room) - 절대 경로 사용
+        output_dir = os.path.abspath(os.path.join("results", "temp", job_id))
         os.makedirs(output_dir, exist_ok=True)
         
+        logger.info(f"✓ Clean room created: {output_dir}")
+        
+        # ============================================================
+        # 동시성 제어 (Concurrency Control)
+        # OpenAI Tier 1 한도(30k TPM) 보호를 위해 최대 스레드를 제한
+        # ============================================================
+        max_thread_num_env = os.getenv("STORM_MAX_THREAD_NUM")
+        default_threads = 3  # 안전한 기본값
+        
+        if max_thread_num_env:
+            # 환경 변수가 있어도 5를 넘지 않도록 제한 (안전장치)
+            max_thread_num = min(int(max_thread_num_env), 5)
+        else:
+            max_thread_num = default_threads
+        
+        logger.info(f"ℹ️  Thread count set to: {max_thread_num} (Safe limit applied)")
+
         engine_args = STORMWikiRunnerArguments(
             output_dir=output_dir,
             max_conv_turn=3,         # MVP 최적화 (속도)
             max_perspective=3,       # MVP 최적화
             search_top_k=search_top_k,
-            max_thread_num=3,
+            max_thread_num=max_thread_num,
         )
         
-        logger.info(f"✓ Engine arguments configured (output_dir={output_dir})")
+        logger.info(f"✓ Engine arguments configured")
         
         # ============================================================
         # Step 7: STORM Runner 실행 (Long-running process!)
@@ -458,25 +657,38 @@ def run_storm_pipeline(
         
         runner = STORMWikiRunner(engine_args, lm_configs, rm)
         
-        # 실제 생성 실행 (1~2분 소요)
-        runner.run(
-            topic=full_topic_for_llm,
-            do_research=True,
-            do_generate_outline=True,
-            do_generate_article=True,
-            do_polish_article=True
-        )
+        # 실제 생성 실행 (1~2분 소요) with simple rate-limit retry
+        max_run_retries = 2
+        for attempt in range(max_run_retries):
+            try:
+                runner.run(
+                    topic=full_topic_for_llm,
+                    do_research=True,
+                    do_generate_outline=True,
+                    do_generate_article=True,
+                    do_polish_article=True
+                )
+                break
+            except Exception as run_err:
+                is_rate = _is_rate_limit_error(run_err)
+                if is_rate and attempt < max_run_retries - 1:
+                    wait_s = 10 * (attempt + 1)
+                    logger.warning(
+                        f"Rate limit detected; retrying in {wait_s}s (attempt {attempt+1}/{max_run_retries})"
+                    )
+                    time.sleep(wait_s)
+                    continue
+                # Re-raise for outer handler
+                raise
         
         jobs_dict[job_id]["progress"] = 80
         logger.info("✓ STORM Runner completed successfully")
         
-        # Post-processing
-        runner.post_run()
-        runner.summary()
-        
         # ============================================================
-        # Step 8: Post-Processing Bridge (FIX-Core-002!)
+        # Step 8: Post-Processing Bridge (FIX-Core-003!)
         # ============================================================
+        # ⚠️ 중요: post_run()과 summary() 전에 파일을 먼저 읽어야 함!
+        # 이유: post_run()이 추가 파일 작업을 할 수 있기 때문
         # ✅ 파일 읽기 → DB 저장 → Report ID 획득
         jobs_dict[job_id]["progress"] = 85
         logger.info("Starting Post-Processing Bridge...")
@@ -492,6 +704,13 @@ def run_storm_pipeline(
         
         if report_id is None:
             raise Exception("Post-Processing Bridge failed: Report ID is None")
+        
+        # Post-processing (선택적 - 로그 생성 등)
+        try:
+            runner.post_run()
+            runner.summary()
+        except Exception as e:
+            logger.warning(f"Post-run processing warning: {e}")
         
         # ============================================================
         # Step 9: Update Status → Completed
@@ -512,7 +731,12 @@ def run_storm_pipeline(
         logger.exception("Full traceback:")
         
         jobs_dict[job_id]["status"] = "failed"
-        jobs_dict[job_id]["message"] = f"리포트 생성 중 오류 발생: {str(e)}"
+        if _is_rate_limit_error(e):
+            jobs_dict[job_id]["message"] = "LLM rate limit에 도달했습니다. 잠시 후 다시 시도해주세요."
+        elif isinstance(e, IndexError):
+            jobs_dict[job_id]["message"] = "LLM 응답이 비어 있습니다 (가능한 rate limit)."
+        else:
+            jobs_dict[job_id]["message"] = f"리포트 생성 중 오류 발생: {str(e)}"
         jobs_dict[job_id]["progress"] = 0
         
         # RM이 초기화되었다면 연결 종료
@@ -521,3 +745,10 @@ def run_storm_pipeline(
                 rm.close()
         except:
             pass
+
+
+# ============================================================
+# 모듈 테스트 (옵션)
+# ============================================================
+if __name__ == "__main__":
+    print("STORM Service module loaded successfully")

@@ -233,8 +233,8 @@ const Dashboard = ({ onReportStart, onJobIdChange, onViewReport }) => {
             >
               <MenuItem value="">전체</MenuItem>
               {companies.map((company) => (
-                <MenuItem key={company} value={company}>
-                  {company}
+                <MenuItem key={company.id} value={company.name}>
+                  {company.name}
                 </MenuItem>
               ))}
             </Select>
@@ -333,8 +333,8 @@ const Dashboard = ({ onReportStart, onJobIdChange, onViewReport }) => {
               onChange={(e) => setModalCompany(e.target.value)}
             >
               {companies.map((company) => (
-                <MenuItem key={company} value={company}>
-                  {company}
+                <MenuItem key={company.id} value={company.name}>
+                  {company.name}
                 </MenuItem>
               ))}
             </Select>
