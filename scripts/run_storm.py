@@ -194,6 +194,42 @@ def _extract_company_from_topic(topic: str, default_company: str | None) -> str:
     return default_company
 
 
+def _extract_pure_topic(full_topic: str, company_name: str | None = None) -> str:
+    """
+    Full topic 문자열에서 순수 주제만 추출합니다.
+    
+    Full topic 형식: "{company_name} {pure_topic}" (예: "삼성전자 기업 개요")
+    순수 주제: "기업 개요"
+    
+    Args:
+        full_topic: 기업명 + 주제가 결합된 문자열 (예: "삼성전자 기업 개요")
+        company_name: 기업명 (None이면 topic에서 추출 시도)
+    
+    Returns:
+        순수 주제 텍스트 (기업명 제거됨)
+    
+    Example:
+        >>> _extract_pure_topic("삼성전자 기업 개요")
+        "기업 개요"
+        >>> _extract_pure_topic("SK하이닉스 재무 분석", "SK하이닉스")
+        "재무 분석"
+    """
+    if not full_topic:
+        return ""
+    
+    # company_name이 없으면 topic에서 추출 시도
+    if company_name is None:
+        company_name = _extract_company_from_topic(full_topic, None)
+    
+    # company_name이 없거나 topic에 포함되지 않으면 전체 반환
+    if not company_name or company_name not in full_topic:
+        return full_topic
+    
+    # company_name 제거 후 좌우 공백 정리
+    pure_topic = full_topic.replace(company_name, "", 1).strip()
+    return pure_topic
+
+
 def create_topic_dir_name(topic: str) -> str:
     """
     토픽명을 파일시스템 호환 디렉토리명으로 변환
@@ -287,21 +323,39 @@ def write_run_args_json(run_output_dir: str, *, topic: str, company_filter: str 
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
-def save_report_to_db(topic: str, output_dir: str, secrets_path: str, model_name: str = "gpt-4o") -> bool:
+def save_report_to_db(full_topic: str, output_dir: str, secrets_path: str, model_name: str = "gpt-4o", company_name: str | None = None) -> bool:
     """
     STORM 실행 결과를 PostgreSQL의 Generated_Reports 테이블에 적재합니다.
 
+    DB에 저장될 때:
+    - topic 컬럼: 순수한 주제만 저장 (기업명 제거됨)
+    - company_name 컬럼: 기업명 저장 (별도 필드)
+    - LLM 질의: run_storm.py 내부에서 "{company_name} {pure_topic}" 형식으로 구성됨
+
     Args:
-        topic: 분석 주제
+        full_topic: "{company_name} {pure_topic}" 형식의 전체 토픽 (예: "삼성전자 기업 개요")
         output_dir: STORM 결과 저장 디렉토리
         secrets_path: secrets.toml 파일 경로
-        model_name: 사용된 LLM 모델명
+        model_name: 사용된 LLM 모델명 (기본값: gpt-4o)
+        company_name: 명시적 기업명 (None이면 full_topic에서 추출)
 
     Returns:
         bool: 성공 여부
     """
-    # 토픽별 결과 디렉토리 경로 생성
-    topic_dir_name = create_topic_dir_name(topic)
+    # company_name 추출 (명시 > 추출)
+    if company_name is None:
+        company_name = _extract_company_from_topic(full_topic, None)
+    if not company_name:
+        company_name = full_topic.split()[0] if full_topic else "Unknown"
+    
+    # pure_topic 추출 (DB 저장용)
+    pure_topic = _extract_pure_topic(full_topic, company_name)
+    if not pure_topic:
+        # 추출 실패 시 전체 토픽 사용 (폴백)
+        pure_topic = full_topic
+    
+    # 토픽별 결과 디렉토리 경로 생성 (원본 full_topic으로 경로 구성)
+    topic_dir_name = create_topic_dir_name(full_topic)
     topic_output_dir = os.path.join(output_dir, topic_dir_name)
 
     # ========================================
@@ -365,12 +419,7 @@ def save_report_to_db(topic: str, output_dir: str, secrets_path: str, model_name
     }
 
     # ========================================
-    # Step 4: company_name 추출 및 company_id 조회
-    # ========================================
-    company_name = topic.split()[0] if topic else "Unknown"
-
-    # ========================================
-    # Step 5: DB INSERT (with company_id FK)
+    # Step 4: company_id 조회 (company_name 기반)
     # ========================================
     try:
         # DB 접속 정보 로드
@@ -405,8 +454,8 @@ def save_report_to_db(topic: str, output_dir: str, secrets_path: str, model_name
 
         cursor.execute(insert_query, (
             company_name,
-            company_id,  # 🔧 NEW: FK 추가
-            topic,
+            company_id,  # 🔧 FK: company_id 추가
+            pure_topic,  # 🔧 CRITICAL: 순수 주제만 DB에 저장 (기업명 제거됨)
             report_content,
             toc_text,
             Json(references_data) if references_data else None,
@@ -419,7 +468,7 @@ def save_report_to_db(topic: str, output_dir: str, secrets_path: str, model_name
         cursor.close()
         conn.close()
 
-        logger.info(f"✓ Report saved to DB: {topic} (company_id={company_id})")
+        logger.info(f"✓ Report saved to DB: {pure_topic} (company_name={company_name}, company_id={company_id})")
         return True
 
     except Exception as e:
@@ -672,8 +721,11 @@ def run_batch_analysis(args):
             # DB 저장 전에 '방금 만든 폴더'만 인코딩 보정 수행
             fix_topic_json_encoding(topic, run_output_dir)
 
-            # DB에 결과 저장 (run_output_dir 기준)
-            save_report_to_db(topic, run_output_dir, secrets_path, model_name=current_model_name)
+            # DB에 결과 저장
+            # 함수 내부에서:
+            # - full_topic에서 company_name과 pure_topic 분리
+            # - pure_topic만 DB에 저장
+            save_report_to_db(topic, run_output_dir, secrets_path, model_name=current_model_name, company_name=company_filter)
 
             elapsed = datetime.now() - topic_start_time
             logger.info(f"✓ Completed '{topic}' in {elapsed.total_seconds():.1f}s")
@@ -827,11 +879,13 @@ def main():
     else:
         # 인터랙티브 모드: CLI에서 기업/주제 선택 후 단건 실행
         company_name, topic = select_company_and_topic()
-        # 쿼리 조합: "{기업명} {주제}" 형식
+        # 쿼리 조합: "{기업명} {주제}" 형식 (LLM 질의용)
         final_topic = f"{company_name} {topic}"
         # args.topics에 단건 할당하여 기존 run_batch_analysis 로직 재사용
+        # 단, topic과 company_name은 분리된 형태로 전달
         args.topics = [final_topic]
         # 선택된 기업명을 args에 추가 (company_filter 기본값으로 사용)
+        # run_batch_analysis에서 topic에서 company_name 추출하므로 redundant이지만 명시적임
         args.company_name = company_name
         run_batch_analysis(args)
 

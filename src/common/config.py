@@ -121,6 +121,82 @@ AI_CONFIG = {
 }
 
 # =============================================================================
+# Analysis Topic Configuration (분석 주제 중앙 관리)
+# =============================================================================
+# Key-Value 구조로 topic 정의 - 프론트/백 전체에서 사용
+# - id: 주제의 고유 식별자 (변경 불가, 데이터 무결성 보장)
+# - label: UI에 표시될 주제명 (변경 가능)
+# - value: DB/LLM에 전달될 순수한 주제 텍스트
+TOPICS = [
+    {
+        "id": "T01",
+        "label": "기업 개요 및 주요 사업 내용",
+        "value": "기업 개요 및 주요 사업 내용"
+    },
+    {
+        "id": "T02",
+        "label": "최근 3개년 재무제표 및 재무 상태 분석",
+        "value": "최근 3개년 재무제표 및 재무 상태 분석"
+    },
+    {
+        "id": "T03",
+        "label": "산업 내 경쟁 우위 및 경쟁사 비교 (SWOT)",
+        "value": "산업 내 경쟁 우위 및 경쟁사 비교"
+    },
+    {
+        "id": "T04",
+        "label": "주요 제품 및 서비스 시장 점유율 분석",
+        "value": "주요 제품 및 서비스 시장 점유율 분석"
+    },
+    {
+        "id": "T05",
+        "label": "R&D 투자 현황 및 기술 경쟁력",
+        "value": "R&D 투자 현황 및 기술 경쟁력"
+    },
+    {
+        "id": "T06",
+        "label": "ESG (환경, 사회, 지배구조) 평가",
+        "value": "ESG (환경, 사회, 지배구조) 평가"
+    },
+    {
+        "id": "custom",
+        "label": "직접 입력",
+        "value": None  # Frontend에서 사용자 입력값으로 대체됨
+    }
+]
+
+
+def get_topic_value_by_id(topic_id: str) -> str:
+    """
+    Topic ID로 value(순수 주제)를 조회합니다.
+    
+    Args:
+        topic_id: TOPICS 리스트의 id 값
+        
+    Returns:
+        해당하는 value (순수 주제 텍스트) 또는 None
+    """
+    for topic in TOPICS:
+        if topic["id"] == topic_id:
+            return topic["value"]
+    return None
+
+
+def get_topic_list_for_api():
+    """
+    Frontend용 주제 리스트 포맷입니다.
+    GET /api/topics 엔드포인트에서 사용됩니다.
+    """
+    return [
+        {
+            "id": topic["id"],
+            "label": topic["label"],
+        }
+        for topic in TOPICS
+    ]
+
+
+# =============================================================================
 # DART API Configuration
 # =============================================================================
 DART_CONFIG = {

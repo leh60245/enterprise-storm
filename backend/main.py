@@ -18,6 +18,7 @@ from datetime import datetime
 
 # Database 모듈 임포트
 from backend.database import get_db_cursor, query_report_by_id, query_all_reports
+from src.common.config import get_topic_list_for_api
 from psycopg2.extras import RealDictCursor
 import psycopg2
 
@@ -27,7 +28,10 @@ import psycopg2
 app = FastAPI(
     title="Enterprise STORM API",
     description="AI-powered Corporate Report Generation API",
-    version="2.0.0"
+    version="2.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
 )
 
 # ============================================================
@@ -112,7 +116,7 @@ class ReportResponse(BaseModel):
     topic: str
     report_content: str  # Markdown Content
     toc_text: Optional[str] = None
-    references_data: Optional[List[Dict[str, Any]]] = None
+    references_data: Optional[Dict[str, Any]] = None  # JSONB 형식 (url_to_info 등)
     meta_info: Optional[Dict[str, Any]] = None
     model_name: Optional[str] = "gpt-4o"
     created_at: Optional[str] = None
@@ -142,26 +146,126 @@ async def root():
     }
 
 
+@app.get("/api/companies", response_model=list)
+async def get_companies():
+    """
+    [GET] 기업 목록 조회 (DB에서 실제 데이터)
+    
+    Returns:
+        List[str]: 기업명 목록 (예: ["SK하이닉스", "현대엔지니어링", ...])
+    """
+    try:
+        with get_db_cursor(RealDictCursor) as cur:
+            cur.execute("""
+                SELECT DISTINCT company_name
+                FROM "Generated_Reports"
+                ORDER BY company_name ASC
+            """)
+            
+            results = cur.fetchall()
+            companies = [row['company_name'] for row in results]
+            
+            # DB에 데이터가 없으면 샘플 데이터 반환
+            if not companies:
+                companies = ["SK하이닉스", "현대엔지니어링", "NAVER", "삼성전자", "LG전자"]
+            
+            return companies
+            
+    except Exception as e:
+        print(f"❌ Error fetching companies: {e}")
+        # Fallback 데이터
+        return ["SK하이닉스", "현대엔지니어링", "NAVER", "삼성전자", "LG전자"]
+
+
+@app.get("/api/topics")
+async def get_topics():
+    """
+    [GET] 분석 주제(Topic) 목록 조회
+    
+    Returns:
+        List[Dict]: 주제 리스트
+        [
+            {
+                "id": "T01",
+                "label": "기업 개요 및 주요 사업 내용"
+            },
+            ...
+        ]
+    
+    특징:
+    - 기업명과 무관하게 전체 공통 주제 반환
+    - Frontend에서 Dropdown 구성 시 사용
+    - "custom" 주제는 사용자 정의 입력 활성화 플래그
+    """
+    return get_topic_list_for_api()
+
+
 @app.post("/api/generate", response_model=JobStatusResponse)
 async def generate_report(request: GenerateRequest):
     """
     [POST] 리포트 생성 요청
     
-    실제 동작 (차후 구현):
+    데이터 정제 로직 (중요):
+    - 입력: company_name과 topic을 분리해서 받음
+    - DB 저장: topic 컬럼에는 순수한 주제 텍스트만 저장
+    - LLM 쿼리: 내부적으로만 f"{company_name} {topic}"으로 합쳐서 사용
+    
+    흐름:
+    1. Frontend에서 { "company_name": "SK하이닉스", "topic": "기업 개요..." } 수신
+    2. DB에 저장할 때: topic = "기업 개요..." (기업명 제외)
+    3. LLM 호출 시: query = f"SK하이닉스 기업 개요..." (내부 변수)
+    
+    차후 개선:
     1. PostgresRM으로 관련 문서 검색
     2. STORM 엔진으로 리포트 생성
     3. Generated_Reports 테이블에 저장
-    
-    현재 동작 (Mock):
-    - 요청을 받으면 무조건 성공 응답 반환
-    - 고정된 job_id 발급
+    4. Celery/Redis 비동기 작업 큐
     """
-    return JobStatusResponse(
-        job_id="mock-job-001",
-        status="processing",
-        progress=0,
-        message=f"{request.company_name}에 대한 '{request.topic}' 리포트 생성을 시작합니다."
-    )
+    try:
+        # ✅ 중요: 입력 검증
+        # topic이 이미 company_name을 포함하면 제거 (방어적 코딩)
+        topic = request.topic
+        company_name = request.company_name
+        
+        # 만약 topic에 company_name이 포함되어 있으면 제거
+        # 예: "SK하이닉스 기업 개요" → "기업 개요"
+        if topic.startswith(company_name):
+            topic = topic[len(company_name):].strip()
+        
+        # DB에서 가장 최근 리포트 ID 조회
+        with get_db_cursor(RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id FROM "Generated_Reports"
+                ORDER BY id DESC LIMIT 1
+            """)
+            result = cur.fetchone()
+            latest_id = result['id'] if result else 1
+        
+        # ✅ LLM 엔진 호출 시에만 합쳐서 사용
+        # (현재는 mock이지만, run_storm.py 연동 시 여기에 query 구성)
+        llm_query = f"{company_name} {topic}"
+        print(f"[INFO] LLM Query: {llm_query}")
+        
+        return JobStatusResponse(
+            job_id=f"job-{latest_id}",
+            status="processing",
+            progress=0,
+            message=f"{company_name}에 대한 '{topic}' 리포트 생성을 시작합니다."
+        )
+    except Exception as e:
+        print(f"❌ Error in generate_report: {e}")
+        return JobStatusResponse(
+            job_id="mock-job-001",
+            status="processing",
+            progress=0,
+            message=f"{request.company_name}에 대한 '{request.topic}' 리포트 생성을 시작합니다."
+        )
+        return JobStatusResponse(
+            job_id="mock-job-001",
+            status="processing",
+            progress=0,
+            message=f"{request.company_name}에 대한 '{request.topic}' 리포트 생성을 시작합니다."
+        )
 
 
 @app.get("/api/status/{job_id}", response_model=JobStatusResponse)
@@ -169,13 +273,30 @@ async def get_job_status(job_id: str):
     """
     [GET] 작업 상태 조회
     
-    실제 동작 (차후 구현):
+    실제 동작 (현재):
+    - job_id에서 ID 추출하여 해당 리포트 확인
+    - completed 상태로 반환 + message에 report ID 포함
+    
+    차후 개선:
     - Redis/DB에서 job_id 기반 상태 조회
     - Celery 등 비동기 작업 큐 상태 확인
-    
-    현재 동작 (Mock):
-    - 모든 job_id에 대해 "completed" 반환
     """
+    try:
+        # job_id에서 숫자 추출 (예: "job-42" → 42)
+        import re
+        match = re.search(r'\d+', job_id)
+        if match:
+            report_id = int(match.group())
+            return JobStatusResponse(
+                job_id=job_id,
+                status="completed",
+                progress=100,
+                message=f"리포트 생성이 완료되었습니다. /api/report/{report_id} 로 조회하세요."
+            )
+    except Exception as e:
+        print(f"❌ Error in get_job_status: {e}")
+    
+    # 기본값
     return JobStatusResponse(
         job_id=job_id,
         status="completed",
