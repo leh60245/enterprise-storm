@@ -10,11 +10,12 @@ Target: PostgreSQL 데이터베이스와 실제로 연동하여 살아있는 데
 - Generated_Reports 테이블 스키마와 1:1 매칭
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict
 from typing import Optional, List, Dict, Any
 from datetime import datetime
+import uuid
 
 # Database 모듈 임포트
 from backend.database import (
@@ -24,6 +25,7 @@ from backend.database import (
     query_companies_from_db,
 )
 from src.common.config import get_topic_list_for_api, get_canonical_company_name, JOB_STATUS
+from backend.storm_service import run_storm_pipeline
 from psycopg2.extras import RealDictCursor
 import psycopg2
 
@@ -38,6 +40,12 @@ app = FastAPI(
     redoc_url="/redoc",
     openapi_url="/openapi.json"
 )
+
+# ============================================================
+# 전역 작업 상태 저장소 (Job Tracking Dictionary)
+# ============================================================
+# 실제 운영 환경에서는 Redis로 변경 필요
+JOBS = {}
 
 # ============================================================
 # CORS 설정 (필수) - 프론트엔드(localhost:3000) 접근 허용
@@ -67,6 +75,12 @@ class GenerateRequest(BaseModel):
     
     company_name: str
     topic: str = "종합 분석"
+
+
+class CompanyInfo(BaseModel):
+    """기업 정보 모델 (ID 포함)"""
+    id: int
+    name: str
 
 
 class JobStatusResponse(BaseModel):
@@ -113,10 +127,21 @@ class ReportResponse(BaseModel):
     status: str = JOB_STATUS.COMPLETED.value
 
 
+class ReportSummary(BaseModel):
+    """리포트 목록 아이템 모델 (company_id 포함)"""
+    report_id: int
+    company_id: Optional[int] = None
+    company_name: str
+    topic: str
+    model_name: Optional[str]
+    created_at: Optional[str]
+    status: str
+
+
 class ReportListResponse(BaseModel):
     """리포트 목록 조회 응답 모델"""
     total: int
-    reports: List[Dict[str, Any]]
+    reports: List[ReportSummary]
 
 
 # ============================================================
@@ -136,19 +161,30 @@ async def root():
     }
 
 
-@app.get("/api/companies", response_model=list)
+@app.get("/api/companies", response_model=List[CompanyInfo])
 async def get_companies():
     """
-    [GET] 기업 목록 조회 (DB에서 실제 데이터)
+    [GET] 기업 목록 조회 (ID 포함)
     
     Returns:
-        List[str]: 기업명 목록 (예: ["SK하이닉스", "현대엔지니어링", ...])
+        [
+            { "id": 1, "name": "삼성전자" },
+            { "id": 2, "name": "SK하이닉스" }
+        ]
     """
     try:
-        return query_companies_from_db()
+        # database.py의 함수가 [{'id': 1, 'company_name': '삼성전자'}, ...] 형태 반환
+        raw_data = query_companies_from_db()
+        
+        # DB 컬럼명(company_name)을 API 모델(name)로 매핑
+        return [
+            CompanyInfo(id=row['id'], name=row['company_name']) 
+            for row in raw_data
+        ]
     except Exception as e:
         print(f"❌ Error fetching companies: {e}")
-        return ["SK하이닉스", "현대엔지니어링", "NAVER", "삼성전자", "LG전자"]
+        # Fallback for dev
+        return []
 
 
 @app.get("/api/topics")
@@ -175,9 +211,9 @@ async def get_topics():
 
 
 @app.post("/api/generate", response_model=JobStatusResponse)
-async def generate_report(request: GenerateRequest):
+async def generate_report(request: GenerateRequest, background_tasks: BackgroundTasks):
     """
-    [POST] 리포트 생성 요청
+    [POST] 리포트 생성 요청 (비동기 처리)
     
     데이터 정제 로직 (중요):
     - 입력: company_name과 topic을 분리해서 받음
@@ -186,14 +222,16 @@ async def generate_report(request: GenerateRequest):
     
     흐름:
     1. Frontend에서 { "company_name": "SK하이닉스", "topic": "기업 개요..." } 수신
-    2. DB에 저장할 때: topic = "기업 개요..." (기업명 제외)
-    3. LLM 호출 시: query = f"SK하이닉스 기업 개요..." (내부 변수)
+    2. job_id 생성 → JOBS 딕셔너리에 초기 상태 저장
+    3. BackgroundTasks에 run_storm_pipeline 등록 (비동기 실행)
+    4. job_id 즉시 반환 → Frontend는 polling 시작
+    5. BackgroundTasks가 실행되며 JOBS[job_id] 상태 업데이트
+    6. 완료 시 JOBS[job_id]["report_id"] 설정
     
-    차후 개선:
-    1. PostgresRM으로 관련 문서 검색
-    2. STORM 엔진으로 리포트 생성
-    3. Generated_Reports 테이블에 저장
-    4. Celery/Redis 비동기 작업 큐
+    개선사항 (FIX-Core-002):
+    - ✅ BackgroundTasks로 비동기 처리
+    - ✅ STORM 엔진의 파일 생성 후 DB에 저장 (Post-Processing Bridge)
+    - ✅ 한글 인코딩 명시적 처리 (UTF-8)
     """
     try:
         company_name = get_canonical_company_name(request.company_name.strip())
@@ -204,69 +242,92 @@ async def generate_report(request: GenerateRequest):
         if not clean_topic:
             clean_topic = raw_topic
 
-        with get_db_cursor(RealDictCursor) as cur:
-            cur.execute("""
-                SELECT id FROM "Generated_Reports"
-                ORDER BY id DESC LIMIT 1
-            """)
-            result = cur.fetchone()
-            latest_id = result['id'] if result else 1
-
-        llm_query = f"{company_name} {clean_topic}".strip()
-        print(f"[INFO] LLM Query: {llm_query}")
-
+        # 새로운 job_id 생성
+        job_id = f"job-{uuid.uuid4()}"
+        
+        # JOBS 딕셔너리에 초기 상태 저장
+        JOBS[job_id] = {
+            "status": JOB_STATUS.PROCESSING.value,
+            "company_name": company_name,
+            "topic": clean_topic,
+            "report_id": None,
+            "progress": 0,
+            "created_at": datetime.now().isoformat(),
+        }
+        
+        # BackgroundTasks에 STORM 파이프라인 등록 (즉시 반환, 백그라운드 실행)
+        background_tasks.add_task(
+            run_storm_pipeline,
+            job_id=job_id,
+            company_name=company_name,
+            topic=clean_topic,
+            jobs_dict=JOBS,
+        )
+        
+        # 즉시 job_id 반환 (Frontend는 이 job_id로 polling 시작)
         return JobStatusResponse(
-            job_id=f"job-{latest_id}",
+            job_id=job_id,
             status=JOB_STATUS.PROCESSING.value,
             progress=0,
             message=f"{company_name}에 대한 '{clean_topic}' 리포트 생성을 시작합니다.",
         )
+        
     except Exception as e:
         print(f"❌ Error in generate_report: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # 에러 발생 시에도 job_id는 반환 (Frontend에서 status 확인 시 에러 감지)
+        job_id = f"job-{uuid.uuid4()}"
+        JOBS[job_id] = {
+            "status": JOB_STATUS.FAILED.value,
+            "message": str(e),
+        }
+        
         return JobStatusResponse(
-            job_id="mock-job-001",
-            status=JOB_STATUS.PROCESSING.value,
+            job_id=job_id,
+            status=JOB_STATUS.FAILED.value,
             progress=0,
-            message=f"{request.company_name}에 대한 '{request.topic}' 리포트 생성을 시작합니다."
+            message=f"에러 발생: {str(e)}"
         )
 
 
 @app.get("/api/status/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(job_id: str):
     """
-    [GET] 작업 상태 조회
+    [GET] 작업 상태 조회 (JOBS 딕셔너리에서 실시간 조회)
     
-    실제 동작 (현재):
-    - job_id에서 ID 추출하여 해당 리포트 확인
-    - completed 상태로 반환 + message에 report ID 포함
+    실제 동작:
+    1. JOBS 딕셔너리에서 job_id 조회
+    2. 현재 상태, 진행률, report_id 반환
+    3. status = "completed"이면 report_id도 포함 (Frontend가 리포트 조회)
+    
+    상태 흐름:
+    - "processing" → 백그라운드 작업 진행 중
+    - "completed" → report_id가 설정됨 (DB에 저장 완료)
+    - "failed" → 에러 발생
     
     차후 개선:
-    - Redis/DB에서 job_id 기반 상태 조회
-    - Celery 등 비동기 작업 큐 상태 확인
+    - Redis로 분산 환경 대응
+    - 데이터베이스 상태 관리
     """
-    try:
-        # job_id에서 숫자 추출 (예: "job-42" → 42)
-        import re
-        match = re.search(r'\d+', job_id)
-        if match:
-            report_id = int(match.group())
-            return JobStatusResponse(
-                job_id=job_id,
-                status=JOB_STATUS.COMPLETED.value,
-                progress=100,
-                report_id=report_id,
-                message=f"리포트 생성이 완료되었습니다. /api/report/{report_id} 로 조회하세요."
-            )
-    except Exception as e:
-        print(f"❌ Error in get_job_status: {e}")
+    if job_id not in JOBS:
+        # Job이 없으면 Not Found
+        return JobStatusResponse(
+            job_id=job_id,
+            status="not_found",
+            progress=0,
+            message="작업을 찾을 수 없습니다."
+        )
     
-    # 기본값
+    job_info = JOBS[job_id]
+    
     return JobStatusResponse(
         job_id=job_id,
-        status=JOB_STATUS.COMPLETED.value,
-        progress=100,
-        report_id=1,
-        message="리포트 생성이 완료되었습니다. /api/report/1 로 조회하세요."
+        status=job_info.get("status", JOB_STATUS.PROCESSING.value),
+        progress=job_info.get("progress", 0),
+        report_id=job_info.get("report_id"),
+        message=job_info.get("message", "작업 진행 중...")
     )
 
 
@@ -313,7 +374,7 @@ async def get_report(report_id: int):
             references=result.get('references_data'),
             meta_info=result.get('meta_info'),
             model_name=result.get('model_name', 'unknown'),
-            created_at=result.get('created_at').isoformat() if result.get('created_at') else None,
+            created_at=result['created_at'].isoformat() if result.get('created_at') else None,
             status=JOB_STATUS.COMPLETED.value,
         )
         
@@ -355,14 +416,15 @@ async def list_reports(
         )
 
         reports = [
-            {
-                "report_id": row.get("report_id") or row.get("id"),
-                "company_name": row.get("company_name"),
-                "topic": row.get("topic"),
-                "model_name": row.get("model_name"),
-                "created_at": row.get("created_at").isoformat() if row.get("created_at") else None,
-                "status": JOB_STATUS.COMPLETED.value,
-            }
+            ReportSummary(
+                report_id=row.get("report_id") or row.get("id"),
+                company_id=row.get("company_id"),
+                company_name=row.get("company_name"),
+                topic=row.get("topic"),
+                model_name=row.get("model_name"),
+                created_at=row["created_at"].isoformat() if row.get("created_at") else None,
+                status=JOB_STATUS.COMPLETED.value,
+            )
             for row in result.get("reports", [])
         ]
 

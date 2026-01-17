@@ -199,25 +199,38 @@ def query_reports_with_filters(
         raise
 
 
-def query_companies_from_db() -> List[str]:
-    """Companies 테이블에서 기업 목록을 조회한다."""
-    queries = [
-        'SELECT DISTINCT company_name FROM "Companies" ORDER BY company_name ASC',
-        'SELECT DISTINCT company_name FROM "Generated_Reports" ORDER BY company_name ASC',
-    ]
-    for sql in queries:
-        try:
-            with get_db_cursor(RealDictCursor) as cur:
-                cur.execute(sql)
-                rows = cur.fetchall()
-                companies = [row.get("company_name") for row in rows if row.get("company_name")] # type: ignore
-                if companies:
-                    return companies
-        except Exception as e:
-            print(f"⚠️ Company query failed for SQL={sql}: {e}")
+def query_companies_from_db() -> List[Dict[str, Any]]:
+    """
+    Companies 테이블에서 기업 ID와 이름을 조회한다.
+    
+    Returns:
+        List[Dict]: [{'id': 1, 'company_name': '삼성전자'}, ...]
+    """
+    # 1순위: Companies 테이블 (마스터 데이터)
+    sql = 'SELECT id, company_name FROM "Companies" ORDER BY company_name ASC'
+    
+    try:
+        with get_db_cursor(RealDictCursor) as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+            
+            # 데이터가 있으면 그대로 반환 (RealDictCursor 덕분에 이미 Dict 형태임)
+            if rows:
+                return rows
+                
+    except Exception as e:
+        print(f"⚠️ Company query failed: {e}")
 
-    # Fallback 샘플 데이터
-    return ["SK하이닉스", "현대엔지니어링", "NAVER", "삼성전자", "LG전자"]
+    # 2순위: 데이터가 없을 경우 (개발용 Fallback)
+    # 주의: 이 경우 id는 가상으로 부여하거나 비워둡니다.
+    print("⚠️ No companies found in DB, returning fallback data.")
+    return [
+        {"id": 1, "company_name": "SK하이닉스"},
+        {"id": 2, "company_name": "현대엔지니어링"},
+        {"id": 3, "company_name": "NAVER"},
+        {"id": 4, "company_name": "삼성전자"},
+        {"id": 5, "company_name": "LG전자"},
+    ]
 
 
 def test_connection():
