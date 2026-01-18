@@ -52,6 +52,7 @@ from psycopg2.extras import Json
 # 프로젝트 루트를 path에 추가
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from src.common.config import TOPICS
 from src.common.db_utils import get_available_companies
 
 from knowledge_storm import (
@@ -60,7 +61,7 @@ from knowledge_storm import (
     STORMWikiLMConfigs,
 )
 from knowledge_storm.lm import OpenAIModel, AzureOpenAIModel, GoogleModel
-from knowledge_storm.rm import PostgresRM
+from knowledge_storm.rm import PostgresRM, SerperRM, HybridRM
 from knowledge_storm.utils import load_api_key
 
 # 로깅 설정
@@ -71,19 +72,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ============================================================
-# 분석 타겟 리스트 (Batch Processing Targets)
-# ============================================================
-ANALYSIS_TARGETS = [
-    "삼성전자 기업 개요 및 주요 사업의 내용"
-    # "삼성전자 최근 3개년 요약 재무제표 및 재무 상태 분석"
-    # "삼성전자 SWOT 분석 (강점, 약점, 기회, 위협)"
-    # "삼성전자 3C 분석 (자사, 경쟁사, 고객)"
-    # "삼성전자 채용 공고 및 인재상 분석"
-]
 
-
-def select_company_and_topic() -> tuple[str, str]:
+def select_company_and_topic() -> tuple[int, str, str]:
     """
     CLI 인터랙티브 모드: 기업 및 주제 선택
 
@@ -91,7 +81,7 @@ def select_company_and_topic() -> tuple[str, str]:
     사용자가 선택한 기업명과 분석 주제를 반환합니다.
 
     Returns:
-        tuple[str, str]: (기업명, 분석 주제)
+        tuple[int, str, str]: (기업ID, 기업명, 분석 주제)
 
     Raises:
         SystemExit: DB에서 기업 목록 조회 실패 시
@@ -107,16 +97,16 @@ def select_company_and_topic() -> tuple[str, str]:
     print("=" * 50)
     print("\n🏢 분석할 기업을 선택하세요:")
 
-    for idx, name in enumerate(companies):
-        print(f"  [{idx + 1}] {name}")
+    for company_id, company_name in companies:
+        print(f"  [{company_id}] {company_name}")
 
-    target_company = ""
+    target_company = (0, "")
     while True:
         try:
             sel = input("\n👉 기업 번호 입력: ").strip()
-            idx = int(sel) - 1
-            if 0 <= idx < len(companies):
-                target_company = companies[idx]
+            company_id = int(sel)
+            if any(cid == company_id for cid, _ in companies):
+                target_company = next((cid, name) for cid, name in companies if cid == company_id)
                 break
             else:
                 print("⚠️ 올바른 번호를 입력해주세요.")
@@ -124,16 +114,11 @@ def select_company_and_topic() -> tuple[str, str]:
             print("⚠️ 숫자를 입력해주세요.")
 
     # 2. 주제 선택
-    topics = [
-        "기업 개요 및 주요 사업 내용",
-        "최근 3개년 재무제표 및 재무 상태 분석",
-        "SWOT 분석 (강점, 약점, 기회, 위협)",
-        "3C 분석 (자사, 경쟁사, 고객)",
-        "채용 공고 및 인재상 분석",
-        "자유 주제 (직접 입력)"
-    ]
-
-    print(f"\n📝 [{target_company}] 관련 분석 주제를 선택하세요:")
+    topics = list()
+    for topic in TOPICS:
+        topics.append(topic["label"])
+        
+    print(f"\n📝 [{target_company[1]}] 관련 분석 주제를 선택하세요:")
     for idx, topic in enumerate(topics):
         print(f"  [{idx + 1}] {topic}")
 
@@ -156,103 +141,11 @@ def select_company_and_topic() -> tuple[str, str]:
         except ValueError:
             print("⚠️ 숫자를 입력해주세요.")
 
-    print(f"\n✅ 분석 시작: {target_company} - {target_topic}")
-    return target_company, target_topic
+    print(f"\n✅ 분석 시작: {target_company[1]} - {target_topic}")
+    return target_company[0], target_company[1], target_topic
 
 
-def _extract_company_from_topic(topic: str, default_company: str | None) -> str:
-    """
-    토픽 문자열에서 기업명을 추출
 
-    COMPANY_ALIASES를 활용하여 토픽에서 언급된 기업명을 찾아
-    정규화된 기업명으로 반환합니다.
-
-    Args:
-        topic: 분석 토픽 (예: "삼성전자 SWOT 분석")
-        default_company: 기본 기업명 (토픽에서 찾지 못한 경우 사용)
-
-    Returns:
-        정규화된 기업명 또는 None
-
-    Example:
-        >>> _extract_company_from_topic("삼전 재무 분석")
-        "삼성전자"
-        >>> _extract_company_from_topic("SK Hynix 개요")
-        "SK하이닉스"
-    """
-    try:
-        # 로컬 import: 스크립트 실행 환경에서만 필요하며, 실패해도 기본값으로 폴백합니다.
-        from src.common.config import extract_companies_from_query  # type: ignore
-
-        companies = extract_companies_from_query(topic)
-        if companies:
-            return companies[0]
-    except Exception as e:
-        # ImportError뿐 아니라 설정/alias 로딩 문제 등도 여기서 로깅 후 폴백
-        logger.warning(f"Could not extract company from topic (fallback to default): {e}")
-
-    return default_company
-
-
-def _extract_pure_topic(full_topic: str, company_name: str | None = None) -> str:
-    """
-    Full topic 문자열에서 순수 주제만 추출합니다.
-    
-    Full topic 형식: "{company_name} {pure_topic}" (예: "삼성전자 기업 개요")
-    순수 주제: "기업 개요"
-    
-    Args:
-        full_topic: 기업명 + 주제가 결합된 문자열 (예: "삼성전자 기업 개요")
-        company_name: 기업명 (None이면 topic에서 추출 시도)
-    
-    Returns:
-        순수 주제 텍스트 (기업명 제거됨)
-    
-    Example:
-        >>> _extract_pure_topic("삼성전자 기업 개요")
-        "기업 개요"
-        >>> _extract_pure_topic("SK하이닉스 재무 분석", "SK하이닉스")
-        "재무 분석"
-    """
-    if not full_topic:
-        return ""
-    
-    # company_name이 없으면 topic에서 추출 시도
-    if company_name is None:
-        company_name = _extract_company_from_topic(full_topic, None)
-    
-    # company_name이 없거나 topic에 포함되지 않으면 전체 반환
-    if not company_name or company_name not in full_topic:
-        return full_topic
-    
-    # company_name 제거 후 좌우 공백 정리
-    pure_topic = full_topic.replace(company_name, "", 1).strip()
-    return pure_topic
-
-
-def create_topic_dir_name(topic: str) -> str:
-    """
-    토픽명을 파일시스템 호환 디렉토리명으로 변환
-
-    규칙:
-    1. 공백은 언더스코어(_)로 변환
-    2. 윈도우 파일 시스템 금지 문자(/:*?"<>|)만 제거/변환
-    3. 괄호(), 쉼표, 등은 유지 (STORM이 유지하기 때문)
-
-    Args:
-        topic: 원본 토픽명
-
-    Returns:
-        언더스코어로 연결된 디렉토리명
-    """
-    # 1. 공백을 언더스코어로 변환
-    dir_name = topic.replace(' ', '_')
-
-    # 2. 파일 시스템 금지 문자만 제거 또는 변환 (/:*?"<>|)
-    # STORM은 보통 /만 _로 바꾸고 나머지는 그대로 두거나 제거함
-    dir_name = dir_name.replace('/', '_').replace('\\', '_')
-    dir_name = re.sub(r'[:*?"<>|]', '', dir_name)
-    return dir_name
 
 
 def _safe_dir_component(name: str, fallback: str = "unknown") -> str:
@@ -266,35 +159,51 @@ def _safe_dir_component(name: str, fallback: str = "unknown") -> str:
     return safe or fallback
 
 
-def build_run_output_dir(base_output_dir: str, company_name: str, topic: str) -> str:
-    """실행별 결과 폴더를 `base/company/topic/YYYYMMDD_HHMMSS` 형태로 생성합니다."""
-    company_dir = _safe_dir_component(company_name, fallback="unknown_company")
-    # topic은 이미 파일시스템 호환 변환 로직이 있으니 재사용
-    topic_dir = create_topic_dir_name(topic)
-    topic_dir = _safe_dir_component(topic_dir, fallback="unknown_topic")
-
-    # 구분 가능한 타임스탬프 (초 단위)
-    timestamp_dir = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    run_dir = os.path.join(base_output_dir, company_dir, topic_dir, timestamp_dir)
-
+def build_run_output_dir(base_output_dir: str, company_id: int, company_name: str = None) -> str:
+    """
+    실행별 결과 폴더를 `base/YYYYMMDD_HHMMSS_company_id/` 형태로 생성합니다.
+    
+    Flat structure로 타임스탬프 + company_id로 고유성을 보장합니다.
+    이를 통해 경로 길이 제한 문제를 회피하고 디버깅을 용이하게 합니다.
+    
+    Args:
+        base_output_dir: 기본 출력 디렉토리
+        company_id: 기업 ID (고유성 보장용)
+        company_name: 기업명 (디렉토리 명에 포함할 수 있음, 선택사항)
+    
+    Returns:
+        생성된 결과 폴더 경로
+    """
+    # 타임스탬프 (초 단위)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    # company_name이 있으면 안전하게 변환하여 접미사로 추가
+    if company_name:
+        company_suffix = _safe_dir_component(company_name, fallback="company")
+        dir_name = f"{timestamp}_{company_id}_{company_suffix}"
+    else:
+        dir_name = f"{timestamp}_{company_id}"
+    
+    run_dir = os.path.join(base_output_dir, dir_name)
+    
     # 같은 초에 재실행/병렬 실행 시 충돌 방지
     suffix = 1
     candidate = run_dir
     while os.path.exists(candidate):
         suffix += 1
         candidate = f"{run_dir}_{suffix}"
-
+    
     os.makedirs(candidate, exist_ok=True)
     return candidate
 
 
-def write_run_args_json(run_output_dir: str, *, topic: str, company_filter: str | None, args, model_name: str):
+def write_run_args_json(run_output_dir: str, *, topic: str, company_id: int, company_name: str, args, model_name: str):
     """실행 폴더에 스크립트 레벨 설정을 JSON으로 기록합니다."""
     payload = {
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "topic": topic,
-        "company_filter": company_filter,
+        "company_id": company_id,
+        "company_name": company_name,
         "model_provider": getattr(args, "model_provider", None),
         "model_name": model_name,
         "output_dir": run_output_dir,
@@ -323,43 +232,45 @@ def write_run_args_json(run_output_dir: str, *, topic: str, company_filter: str 
         json.dump(payload, f, indent=2, ensure_ascii=False)
 
 
-def save_report_to_db(full_topic: str, output_dir: str, secrets_path: str, model_name: str = "gpt-4o", company_name: str | None = None) -> bool:
+def save_report_to_db(ai_query: str, output_dir: str, secrets_path: str, model_name: str, company_id: int, company_name: str, analysis_topic: str) -> bool:
     """
     STORM 실행 결과를 PostgreSQL의 Generated_Reports 테이블에 적재합니다.
-
-    DB에 저장될 때:
-    - topic 컬럼: 순수한 주제만 저장 (기업명 제거됨)
-    - company_name 컬럼: 기업명 저장 (별도 필드)
-    - LLM 질의: run_storm.py 내부에서 "{company_name} {pure_topic}" 형식으로 구성됨
+    
+    폴더 구조:
+        base/YYYYMMDD_HHMMSS_company_id_company_name/
+            {ai_query}/  ← STORM runner가 생성하는 폴더
+                conversation_log.json
+                storm_gen_outline.txt
+                storm_gen_article_polished.txt
+                url_to_info.json
+                raw_search_results.json
+                ...
 
     Args:
-        full_topic: "{company_name} {pure_topic}" 형식의 전체 토픽 (예: "삼성전자 기업 개요")
-        output_dir: STORM 결과 저장 디렉토리
-        secrets_path: secrets.toml 파일 경로
-        model_name: 사용된 LLM 모델명 (기본값: gpt-4o)
-        company_name: 명시적 기업명 (None이면 full_topic에서 추출)
+        ai_query: LLM에게 입력된 실제 질문/프롬프트 (폴더명으로도 사용됨)
+        output_dir: STORM 실행 결과 기본 디렉토리 (= run_output_dir)
+        secrets_path: 비밀 정보 파일 경로
+        model_name: 사용한 모델명 ('openai' 또는 'gemini')
+        company_id: Companies table의 ID (필수, FK)
+        company_name: 기업명
+        analysis_topic: 분석 주제 (DB에 저장할 topic 필드)
 
     Returns:
-        bool: 성공 여부
+        bool: 저장 성공 여부
     """
-    # company_name 추출 (명시 > 추출)
-    if company_name is None:
-        company_name = _extract_company_from_topic(full_topic, None)
-    if not company_name:
-        company_name = full_topic.split()[0] if full_topic else "Unknown"
     
-    # pure_topic 추출 (DB 저장용)
-    pure_topic = _extract_pure_topic(full_topic, company_name)
-    if not pure_topic:
-        # 추출 실패 시 전체 토픽 사용 (폴백)
-        pure_topic = full_topic
-    
-    # 토픽별 결과 디렉토리 경로 생성 (원본 full_topic으로 경로 구성)
-    topic_dir_name = create_topic_dir_name(full_topic)
-    topic_output_dir = os.path.join(output_dir, topic_dir_name)
-
     # ========================================
-    # Step 1: 필수 파일 읽기
+    # Step 1: 파일 경로 구성
+    # ========================================
+    # STORM runner는 {ai_query}를 파일시스템 안전 디렉토리명으로 변환하여 파일 생성
+    # 공백 → 언더바(_), 금지문자 제거
+    safe_topic_dir = _safe_dir_component(ai_query)
+    topic_output_dir = os.path.join(output_dir, safe_topic_dir)
+    
+    logger.info(f"Reading STORM output from: {topic_output_dir}")
+    
+    # ========================================
+    # Step 2: 필수 파일 읽기
     # ========================================
     # storm_gen_article_polished.txt (필수)
     polished_article_path = os.path.join(topic_output_dir, "storm_gen_article_polished.txt")
@@ -419,7 +330,7 @@ def save_report_to_db(full_topic: str, output_dir: str, secrets_path: str, model
     }
 
     # ========================================
-    # Step 4: company_id 조회 (company_name 기반)
+    # Step 4: DB에 저장
     # ========================================
     try:
         # DB 접속 정보 로드
@@ -432,19 +343,6 @@ def save_report_to_db(full_topic: str, output_dir: str, secrets_path: str, model
         )
 
         cursor = conn.cursor()
-        
-        # 🔧 FIX: company_name으로 company_id 조회
-        cursor.execute("""
-            SELECT id FROM "Companies" WHERE company_name = %s
-        """, (company_name,))
-        result = cursor.fetchone()
-        
-        if not result:
-            logger.warning(f"⚠️ Company '{company_name}' not found in Companies table. Inserting without company_id.")
-            company_id = None
-        else:
-            company_id = result[0]
-            logger.info(f"✓ Found company_id: {company_id} for '{company_name}'")
 
         insert_query = """
         INSERT INTO "Generated_Reports"
@@ -454,8 +352,8 @@ def save_report_to_db(full_topic: str, output_dir: str, secrets_path: str, model
 
         cursor.execute(insert_query, (
             company_name,
-            company_id,  # 🔧 FK: company_id 추가
-            pure_topic,  # 🔧 CRITICAL: 순수 주제만 DB에 저장 (기업명 제거됨)
+            company_id,
+            analysis_topic,  # 분석 주제 (카테고리)
             report_content,
             toc_text,
             Json(references_data) if references_data else None,
@@ -468,7 +366,7 @@ def save_report_to_db(full_topic: str, output_dir: str, secrets_path: str, model
         cursor.close()
         conn.close()
 
-        logger.info(f"✓ Report saved to DB: {pure_topic} (company_name={company_name}, company_id={company_id})")
+        logger.info(f"✓ Report saved to DB: {analysis_topic} (company_id={company_id}, company_name={company_name})")
         return True
 
     except Exception as e:
@@ -499,9 +397,7 @@ def setup_lm_configs(provider: str = "openai") -> STORMWikiLMConfigs:
         gemini_flash_model = "gemini-2.0-flash"
         gemini_pro_model = "gemini-2.0-flash"
 
-        # 각 컴포넌트별 LM 설정
-        # - conv_simulator_lm, question_asker_lm: 빠른 모델 (대화 시뮬레이션)
-        # - outline_gen_lm, article_gen_lm, article_polish_lm: 강력한 모델 (콘텐츠 생성)
+        
         conv_simulator_lm = GoogleModel(
             model=gemini_flash_model, max_tokens=2048, **gemini_kwargs  # 토큰 수 약간 상향
         )
@@ -533,35 +429,35 @@ def setup_lm_configs(provider: str = "openai") -> STORMWikiLMConfigs:
         ModelClass = OpenAIModel if api_type == "openai" else AzureOpenAIModel
 
         # 모델명 설정
-        gpt_35_model_name = "gpt-4o-mini" 
-        gpt_4_model_name = "gpt-4o"
+        gpt_large_model = "gpt-4o-mini" 
+        gpt_fast_model = "gpt-4o"
 
         # Azure 설정 (필요시)
         if api_type == "azure":
             openai_kwargs["api_base"] = os.getenv("AZURE_API_BASE")
             openai_kwargs["api_version"] = os.getenv("AZURE_API_VERSION")
 
-        # 각 컴포넌트별 LM 설정
-        # - conv_simulator_lm, question_asker_lm: 저렴한 모델 (대화 시뮬레이션)
-        # - outline_gen_lm, article_gen_lm, article_polish_lm: 강력한 모델 (콘텐츠 생성)
         conv_simulator_lm = ModelClass(
-            model=gpt_35_model_name, max_tokens=500, **openai_kwargs
+            model=gpt_large_model, max_tokens=500, **openai_kwargs
         )
         question_asker_lm = ModelClass(
-            model=gpt_35_model_name, max_tokens=500, **openai_kwargs
+            model=gpt_large_model, max_tokens=500, **openai_kwargs
         )
         outline_gen_lm = ModelClass(
-            model=gpt_4_model_name, max_tokens=400, **openai_kwargs
+            model=gpt_fast_model, max_tokens=400, **openai_kwargs
         )
         article_gen_lm = ModelClass(
-            model=gpt_4_model_name, max_tokens=700, **openai_kwargs
+            model=gpt_fast_model, max_tokens=700, **openai_kwargs
         )
         article_polish_lm = ModelClass(
-            model=gpt_4_model_name, max_tokens=4000, **openai_kwargs
+            model=gpt_fast_model, max_tokens=4000, **openai_kwargs
         )
 
-        logger.info(f"✓ Using OpenAI models: {gpt_35_model_name} (fast), {gpt_4_model_name} (pro)")
+        logger.info(f"✓ Using OpenAI models: {gpt_large_model} (fast), {gpt_fast_model} (pro)")
 
+    # 각 컴포넌트별 LM 설정
+    # - conv_simulator_lm, question_asker_lm: 빠른 모델 (대화 시뮬레이션)
+    # - outline_gen_lm, article_gen_lm, article_polish_lm: 강력한 모델 (콘텐츠 생성)
     lm_configs.set_conv_simulator_lm(conv_simulator_lm)
     lm_configs.set_question_asker_lm(question_asker_lm)
     lm_configs.set_outline_gen_lm(outline_gen_lm)
@@ -571,39 +467,43 @@ def setup_lm_configs(provider: str = "openai") -> STORMWikiLMConfigs:
     return lm_configs
 
 
-def fix_topic_json_encoding(topic: str, output_dir: str):
+def fix_topic_json_encoding(ai_query: str, output_dir: str):
     """
-    방금 생성된 특정 토픽의 결과 폴더 내 JSON 파일들만 인코딩을 보정합니다.
-    (전체 디렉토리를 스캔하지 않아 효율적입니다.)
+    생성된 결과 폴더 내 JSON 파일들의 인코딩을 보정합니다.
+    STORM이 생성한 ai_query 기반 하위 폴더 내의 JSON 파일들을 처리합니다.
 
     Args:
-        topic: 분석 주제 (폴더명 생성용)
-        output_dir: 전체 결과 저장 루트 경로
+        ai_query: LLM에게 입력된 질문 (STORM이 폴더명으로 사용)
+        output_dir: STORM 실행 결과 기본 디렉토리 (= run_output_dir)
     """
-    # 1. save_report_to_db와 동일한 로직으로 타겟 폴더 경로 생성
-    topic_dir_name = create_topic_dir_name(topic)
-    target_dir = os.path.join(output_dir, topic_dir_name)
-
-    if not os.path.exists(target_dir):
-        logger.warning(f"Target directory not found for encoding fix: {target_dir}")
+    # STORM이 생성한 실제 폴더 경로 구성 (공백→언더바 변환)
+    safe_topic_dir = _safe_dir_component(ai_query)
+    topic_output_dir = os.path.join(output_dir, safe_topic_dir)
+    
+    if not os.path.exists(topic_output_dir):
+        logger.warning(f"Output directory not found for encoding fix: {topic_output_dir}")
         return
 
-    logger.info(f"Fixing JSON encoding in specific folder: {target_dir}")
+    logger.info(f"Fixing JSON encoding in: {topic_output_dir}")
 
-    # 2. 해당 폴더 내의 파일만 순회
-    for file in os.listdir(target_dir):
-        if file.endswith(".json"):
-            file_path = os.path.join(target_dir, file)
-            try:
-                # 읽기
-                with open(file_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+    # topic_output_dir 내의 JSON 파일만 순회하여 인코딩 보정
+    try:
+        for file in os.listdir(topic_output_dir):
+            if file.endswith(".json"):
+                file_path = os.path.join(topic_output_dir, file)
+                try:
+                    # 읽기
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
 
-                # 다시 쓰기 (ensure_ascii=False)
-                with open(file_path, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=4, ensure_ascii=False)
-            except Exception as e:
-                logger.warning(f"Failed to fix encoding for {file}: {e}")
+                    # 다시 쓰기 (ensure_ascii=False)
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        json.dump(data, f, indent=4, ensure_ascii=False)
+                    logger.info(f"  ✓ Fixed: {file}")
+                except Exception as e:
+                    logger.warning(f"  ⚠️ Failed to fix encoding for {file}: {e}")
+    except Exception as e:
+        logger.error(f"Error accessing output directory: {e}")
 
 
 def run_batch_analysis(args):
@@ -613,20 +513,14 @@ def run_batch_analysis(args):
     Args:
         args: ArgumentParser에서 파싱된 인자
     """
-    # secrets.toml 로드
-    secrets_path = os.path.join(os.path.dirname(__file__), "..", "secrets.toml")
-    if os.path.exists(secrets_path):
-        load_api_key(toml_file_path=secrets_path)
-        logger.info(f"✓ Loaded secrets from: {secrets_path}")
-    else:
-        # 현재 디렉토리에서도 찾기
-        if os.path.exists("secrets.toml"):
-            load_api_key(toml_file_path="secrets.toml")
-            logger.info("✓ Loaded secrets from: secrets.toml")
-        else:
-            logger.error("✗ secrets.toml not found!")
-            logger.error("  Please create secrets.toml with required API keys and DB credentials.")
-            sys.exit(1)
+    
+    # .env 파일로 환경변수 로드
+    env_path = os.path.join(os.path.dirname(__file__), "..", ".env")
+    if os.path.exists(env_path):
+        from dotenv import load_dotenv
+        load_dotenv(dotenv_path=env_path)
+        logger.info(f"✓ Loaded environment variables from: {env_path}")
+        
 
     # LM 설정 초기화
     logger.info("Initializing LM configurations...")
@@ -636,120 +530,128 @@ def run_batch_analysis(args):
     if args.model_provider == "gemini":
         current_model_name = "gemini"
     else:
-        current_model_name = "gpt-4o"
+        current_model_name = "openai"
 
-    # PostgresRM 초기화 (내부 DB 검색)
-    # company_filter는 각 토픽 처리 시 동적으로 설정됨
-    logger.info("Initializing PostgresRM (Internal DB Search)...")
-    rm = PostgresRM(k=args.search_top_k, min_score=args.min_score)
-    logger.info(f"✓ PostgresRM initialized with k={args.search_top_k}, min_score={args.min_score}")
-
-    # 분석 대상 리스트 결정
-    if args.topics:
-        # 커맨드라인에서 지정된 토픽 사용
-        analysis_targets = args.topics
+    # HybridRM 초기화 (내부 DB + 외부 검색 혼합)
+    logger.info("Initializing HybridRM (Internal DB + External Search)...")
+    
+    # 내부 검색: PostgresRM (DART 보고서)
+    internal_rm = PostgresRM(k=args.search_top_k, min_score=args.min_score)
+    logger.info(f"✓ Internal RM (PostgresRM) initialized with k={args.search_top_k}")
+    
+    # 외부 검색: SerperRM (Google Search)
+    serper_api_key = os.getenv("SERPER_API_KEY")
+    if not serper_api_key:
+        logger.warning("⚠️ SERPER_API_KEY not found. External search will be disabled.")
+        logger.warning("   Set SERPER_API_KEY to enable hybrid search.")
+        return  # 외부 검색 키 없으면 배치 중단
     else:
-        # 기본 분석 타겟 사용
-        analysis_targets = ANALYSIS_TARGETS
+        external_rm = SerperRM(serper_search_api_key=serper_api_key, k=args.search_top_k)
+        logger.info(f"✓ External RM (SerperRM) initialized with k={args.search_top_k}")
+        
+        # HybridRM 조합 (3:7 비율)
+        rm = HybridRM(internal_rm, external_rm, internal_k=3, external_k=7)
+        logger.info("✓ HybridRM initialized with internal_k=3, external_k=7 (3:7 ratio)")
 
-    # company_name이 전달된 경우 (인터랙티브 모드에서 호출)
-    # args.company_name이 있으면 그 값을 사용
-    default_company_filter = getattr(args, 'company_name', None)
-
-    total_topics = len(analysis_targets)
-    successful = 0
-    failed = 0
+    # 커맨드라인에서 지정된 정보 사용
+    company_id = args.company_id
+    company_name = args.company_name
+    analysis_topic = args.analysis_topic  # UI에서 선택된 분석 주제 카테고리
+    ai_query = f"{company_name} {analysis_topic}"  # LLM에게 입력되는 실제 질문
+ 
 
     logger.info("=" * 60)
     logger.info(f"Starting Enterprise STORM Batch Analysis")
     logger.info(f"Model provider: {args.model_provider} ({current_model_name})")
-    logger.info(f"Total topics to process: {total_topics}")
+    logger.info(f"Total report titles to process: 1")
     logger.info(f"Output directory: {args.output_dir}")
-    if default_company_filter:
-        logger.info(f"Default company filter: {default_company_filter}")
+    logger.info(f"Company: {company_name} (ID: {company_id})")
     logger.info("=" * 60)
+    
+    successful = True
 
-    for idx, topic in enumerate(analysis_targets, 1):
-        topic_start_time = datetime.now()
-        logger.info("")
-        logger.info(f"[{idx}/{total_topics}] Processing: '{topic}'")
-        logger.info("-" * 50)
+    topic_start_time = datetime.now()
+    logger.info("-" * 50)
 
-        try:
-            # 토픽에서 기업명 추출하여 company_filter 설정
-            company_filter = _extract_company_from_topic(topic, default_company_filter)
-            rm.set_company_filter(company_filter)
-            if company_filter:
-                logger.info(f"📌 Company filter set to: {company_filter}")
+    try:
+        # 기업 정보 검증
+        if not company_id or not company_name:
+            logger.error("❌ company_id and company_name are required")
+            raise ValueError("Company ID and name are required")
 
-            # 실행별로 별도 폴더 구성: base/company/topic/timestamp
-            run_output_dir = build_run_output_dir(args.output_dir, company_filter or default_company_filter, topic)
-            logger.info(f"📁 Run output directory: {run_output_dir}")
+        # 실행별로 별도 폴더 구성: base/YYYYMMDD_HHMMSS_company_id_company_name/
+        run_output_dir = build_run_output_dir(args.output_dir, company_id, company_name)
+        logger.info(f"📁 Run output directory: {run_output_dir}")
 
-            # Engine Arguments 설정 (output_dir을 run_output_dir로 지정)
-            engine_args = STORMWikiRunnerArguments(
-                output_dir=run_output_dir,
-                max_conv_turn=args.max_conv_turn,
-                max_perspective=args.max_perspective,
-                search_top_k=args.search_top_k,
-                max_thread_num=args.max_thread_num,
-            )
+        # Engine Arguments 설정 (output_dir을 run_output_dir로 지정)
+        engine_args = STORMWikiRunnerArguments(
+            output_dir=run_output_dir,
+            max_conv_turn=args.max_conv_turn,
+            max_perspective=args.max_perspective,
+            search_top_k=args.search_top_k,
+            max_thread_num=args.max_thread_num,
+        )
 
-            # Runner 생성
-            runner = STORMWikiRunner(engine_args, lm_configs, rm)
+        # Runner 생성
+        runner = STORMWikiRunner(engine_args, lm_configs, rm)
 
-            # STORM 파이프라인 실행
-            runner.run(
-                topic=topic,
-                do_research=args.do_research,
-                do_generate_outline=args.do_generate_outline,
-                do_generate_article=args.do_generate_article,
-                do_polish_article=args.do_polish_article,
-            )
-            runner.post_run()
-            runner.summary()
+        # STORM 파이프라인 실행
+        runner.run(
+            topic=ai_query,
+            do_research=args.do_research,
+            do_generate_outline=args.do_generate_outline,
+            do_generate_article=args.do_generate_article,
+            do_polish_article=args.do_polish_article,
+        )
+        runner.post_run()
+        runner.summary()
 
-            # 스크립트 레벨 실행 설정 저장
-            write_run_args_json(
-                run_output_dir,
-                topic=topic,
-                company_filter=company_filter,
-                args=args,
-                model_name=current_model_name,
-            )
+        # 스크립트 레벨 실행 설정 저장
+        write_run_args_json(
+            run_output_dir,
+            topic=analysis_topic,
+            company_id=company_id,
+            company_name=company_name,
+            args=args,
+            model_name=current_model_name,
+        )
 
-            # DB 저장 전에 '방금 만든 폴더'만 인코딩 보정 수행
-            fix_topic_json_encoding(topic, run_output_dir)
+        # DB 저장 전에 '방금 만든 폴더'만 인코딩 보정 수행
+        fix_topic_json_encoding(ai_query, run_output_dir)
 
-            # DB에 결과 저장
-            # 함수 내부에서:
-            # - full_topic에서 company_name과 pure_topic 분리
-            # - pure_topic만 DB에 저장
-            save_report_to_db(topic, run_output_dir, secrets_path, model_name=current_model_name, company_name=company_filter)
+        # DB에 결과 저장
+        save_report_to_db(ai_query, run_output_dir, "secrets_path", model_name=current_model_name, company_id=company_id, company_name=company_name, analysis_topic=analysis_topic)
+        elapsed = datetime.now() - topic_start_time
+        logger.info(f"✓ Completed '{ai_query}' in {elapsed.total_seconds():.1f}s")
 
-            elapsed = datetime.now() - topic_start_time
-            logger.info(f"✓ Completed '{topic}' in {elapsed.total_seconds():.1f}s")
-            successful += 1
+    except Exception as e:
+        elapsed = datetime.now() - topic_start_time
+        logger.error(f"✗ Failed '{ai_query}' after {elapsed.total_seconds():.1f}s")
+        logger.error(f"  Error: {e}")
+        
+        # 디버깅을 위한 상세 스택 트레이스 출력
+        import traceback
+        logger.error("  Full traceback:")
+        logger.error(traceback.format_exc())
+        
+        successful = False
 
-        except Exception as e:
-            elapsed = datetime.now() - topic_start_time
-            logger.error(f"✗ Failed '{topic}' after {elapsed.total_seconds():.1f}s")
-            logger.error(f"  Error: {e}")
-            failed += 1
+        if args.stop_on_error:
+            logger.error("Stopping due to --stop-on-error flag")
+            raise
 
-            if args.stop_on_error:
-                logger.error("Stopping due to --stop-on-error flag")
-                break
-
-    # PostgresRM 연결 종료
-    rm.close()
+    finally:
+        # PostgresRM 연결 종료
+        rm.close()
 
     # 최종 요약
     logger.info("")
     logger.info("=" * 60)
     logger.info("Batch Analysis Complete!")
-    logger.info(f"  Successful: {successful}/{total_topics}")
-    logger.info(f"  Failed: {failed}/{total_topics}")
+    if successful:
+        logger.info(f"  Successful!")
+    else:
+        logger.info(f"  Failed...")
     logger.info(f"  Output directory: {args.output_dir}")
     logger.info("=" * 60)
 
@@ -781,15 +683,6 @@ def main():
         choices=["openai", "gemini"],
         default="openai",
         help="사용할 LLM 공급자 선택 (openai 또는 gemini, 기본값: openai)",
-    )
-
-    # 토픽 설정 (선택적)
-    parser.add_argument(
-        "--topics",
-        type=str,
-        nargs="+",
-        default=None,
-        help="분석할 토픽 리스트 (미지정시 기본 리스트 사용)",
     )
 
     # PostgresRM 설정
@@ -870,24 +763,11 @@ def main():
         args.do_generate_article = True
         args.do_polish_article = True
 
-    # 실행 모드 분기
-    if args.batch:
-        # 배치 모드: 기존 ANALYSIS_TARGETS 리스트 일괄 처리
-        # company_name은 토픽에서 자동 추출됨
-        args.company_name = None
-        run_batch_analysis(args)
-    else:
-        # 인터랙티브 모드: CLI에서 기업/주제 선택 후 단건 실행
-        company_name, topic = select_company_and_topic()
-        # 쿼리 조합: "{기업명} {주제}" 형식 (LLM 질의용)
-        final_topic = f"{company_name} {topic}"
-        # args.topics에 단건 할당하여 기존 run_batch_analysis 로직 재사용
-        # 단, topic과 company_name은 분리된 형태로 전달
-        args.topics = [final_topic]
-        # 선택된 기업명을 args에 추가 (company_filter 기본값으로 사용)
-        # run_batch_analysis에서 topic에서 company_name 추출하므로 redundant이지만 명시적임
-        args.company_name = company_name
-        run_batch_analysis(args)
+    # CLI에서 기업/주제 선택 후 단건 실행
+    args.company_id, args.company_name, args.analysis_topic = select_company_and_topic()
+        
+    # 배치 분석 실행
+    run_batch_analysis(args)
 
 
 if __name__ == "__main__":

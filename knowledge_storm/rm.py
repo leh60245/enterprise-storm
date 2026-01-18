@@ -564,6 +564,7 @@ class SerperRM(dspy.Retrieve):
             except:
                 continue
 
+        # 딕셔너리 리스트를 직접 반환 (YouRM, BingSearch와 동일)
         return collected_results
 
 
@@ -1118,7 +1119,7 @@ class AzureAISearch(dspy.Retrieve):
         azure_ai_search_url=None,
         azure_ai_search_index_name=None,
         k=3,
-        is_valid_source: Callable = None,
+        is_valid_source: Callable = None, # type: ignore
     ):
         """
         Params:
@@ -1243,32 +1244,23 @@ class PostgresRM(dspy.Retrieve):
     PostgreSQL 벡터 검색 기반 Retrieval Model for STORM
 
     내부 PostgreSQL DB(Source_Materials 테이블)에서 pgvector를 활용하여
-    벡터 유사도 검색을 수행합니다. DART 보고서 데이터를 우선 검색합니다.
-
-    DEV_GUIDELINES.md의 "Internal Data First" 철학을 따릅니다.
-
-    기업명 필터링 (Cross-Reference 노이즈 방지):
-    - company_filter: 기본 검색 시 특정 기업 문서만 검색 (Default)
-    - 비교 질문 감지 시: company_filter_list로 확장 (Expansion)
+    벡터 유사도 검색을 수행합니다. DART 보고서 데이터를 기반으로 검색합니다.
 
     Attributes:
         connector: PostgresConnector 인스턴스
         k: 검색할 최대 결과 수
-        min_score: 최소 유사도 임계값 (이 값보다 낮으면 경고 로그)
-        company_filter: 기본 기업명 필터 (None이면 전체 검색)
+        min_score: 최소 유사도 임계값
         usage: 검색 호출 횟수 추적
 
     Example:
-        >>> rm = PostgresRM(k=5, min_score=0.5, company_filter="삼성전자")
-        >>> result = rm.forward("재무 현황")  # 삼성전자 문서만 검색
-        >>> result = rm.forward("삼성전자와 SK하이닉스 비교")  # 둘 다 검색
+        >>> rm = PostgresRM(k=5, min_score=0.5)
+        >>> result = rm.forward("재무 현황")
     """
 
     def __init__(
         self,
         k: int = 5,
-        min_score: float = 0.5,
-        company_filter: str = None
+        min_score: float = 0.5
     ):
         """
         PostgresRM 초기화
@@ -1276,9 +1268,6 @@ class PostgresRM(dspy.Retrieve):
         Args:
             k: 검색할 최대 결과 수 (기본값: 5)
             min_score: 최소 유사도 임계값 (기본값: 0.5)
-                       검색 결과의 score가 이 값보다 낮으면 경고 로그를 남김
-                       (추후 외부 검색 연동을 위한 포석)
-            company_filter: 기본 기업명 필터 (None이면 전체 검색)
 
         Raises:
             RuntimeError: PostgresConnector 초기화 실패 시
@@ -1289,12 +1278,10 @@ class PostgresRM(dspy.Retrieve):
 
         self.connector = PostgresConnector()
         self.min_score = min_score
-        self.company_filter = company_filter
         self.usage = 0
 
         logging.info(
-            f"PostgresRM initialized with k={k}, min_score={min_score}, "
-            f"company_filter={company_filter}"
+            f"PostgresRM initialized with k={k}, min_score={min_score}"
         )
 
     def set_company_filter(self, company_name: str):
@@ -1318,72 +1305,14 @@ class PostgresRM(dspy.Retrieve):
         self.usage = 0
         return {"PostgresRM": usage}
 
-    def _detect_comparison_and_expand_filter(self, query: str) -> tuple:
-        """
-        비교 질문 감지 및 필터 확장 전략 (Query Routing)
-
-        비교/경쟁 키워드가 포함된 질문인 경우, 질문에서 언급된 기업들로
-        필터를 확장합니다 (해제가 아닌 Allow-list 확장).
-
-        Args:
-            query: 검색 쿼리
-
-        Returns:
-            tuple: (company_filter, company_filter_list)
-                - 일반 질문: (self.company_filter, None)
-                - 비교 질문: (None, [기업1, 기업2, ...])
-        """
-        try:
-            from src.common.config import (
-                is_comparison_query,
-                extract_companies_from_query,
-                get_canonical_company_name
-            )
-
-            if not is_comparison_query(query):
-                # 일반 질문: 기본 필터 사용
-                return (self.company_filter, None)
-
-            # 비교 질문: 질문에서 언급된 기업들 추출
-            mentioned_companies = extract_companies_from_query(query)
-
-            if not mentioned_companies:
-                # 비교 키워드는 있지만 구체적인 기업명이 없음
-                # 기본 필터 유지 (안전하게)
-                logging.warning(
-                    f"Comparison query detected but no companies found: {query}. "
-                    f"Keeping default filter: {self.company_filter}"
-                )
-                return (self.company_filter, None)
-
-            # 기본 필터 기업도 리스트에 추가 (현재 분석 대상)
-            if self.company_filter:
-                canonical_default = get_canonical_company_name(self.company_filter)
-                if canonical_default not in mentioned_companies:
-                    mentioned_companies.append(canonical_default)
-
-            logging.info(
-                f"Comparison query detected! Expanding filter to: {mentioned_companies}"
-            )
-            return (None, mentioned_companies)
-
-        except ImportError:
-            # src.common.config를 import할 수 없는 경우 기본 필터 사용
-            logging.warning("Could not import config for query routing. Using default filter.")
-            return (self.company_filter, None)
-
     def forward(
         self,
         query_or_queries: Union[str, List[str]],
         exclude_urls: List[str] = [],
-        k: int = None
+        k: int = None # type: ignore
     ):
         """
         STORM 엔진에서 호출하는 검색 메서드
-
-        Query Routing:
-        - 일반 질문: company_filter로 단일 기업 문서만 검색
-        - 비교 질문: company_filter_list로 확장하여 복수 기업 검색
 
         Args:
             query_or_queries: 검색 쿼리 (단일 문자열 또는 문자열 리스트)
@@ -1393,10 +1322,6 @@ class PostgresRM(dspy.Retrieve):
         Returns:
             dspy.Prediction: passages 필드에 검색 결과 리스트 포함
                 - 각 결과는 {'content', 'title', 'url', 'score'} 형태
-
-        Note:
-            검색 결과의 score가 min_score보다 낮으면 경고 로그를 남깁니다.
-            이는 추후 하이브리드 검색(외부 검색 Fallback) 구현을 위한 준비입니다.
         """
         # 검색 개수 결정
         search_k = k if k is not None else self.k
@@ -1414,24 +1339,18 @@ class PostgresRM(dspy.Retrieve):
 
         for query in queries:
             try:
-                # Query Routing: 비교 질문 감지 및 필터 확장
-                company_filter, company_filter_list = self._detect_comparison_and_expand_filter(query)
-
-                # PostgresConnector를 통한 벡터 검색 (필터 적용)
+                # PostgresConnector를 통한 벡터 검색
                 results = self.connector.search(
                     query,
-                    top_k=search_k,
-                    company_filter=company_filter,
-                    company_filter_list=company_filter_list
+                    top_k=search_k
                 )
 
                 for result in results:
-                    # 최소 점수 체크 (하이브리드 검색 로직 준비)
+                    # 최소 점수 체크
                     if result.get('score', 0) < self.min_score:
                         low_score_count += 1
 
-                    # STORM 호환 포맷으로 변환
-
+                    # STORM 호환 포맷으로 변환 (딕셔너리 형태)
                     entry = {
                         "content": result.get("content", ""),
                         "snippets": [result.get("content", "")],  # STORM 필수
@@ -1441,7 +1360,8 @@ class PostgresRM(dspy.Retrieve):
                         "score": result.get("score", 0.0)
                     }
 
-                    collected_results.append(dspy.Prediction(**entry))
+                    # 딕셔너리 그대로 추가 (dspy.Prediction으로 감싸지 않음)
+                    collected_results.append(entry)
 
             except Exception as e:
                 logging.error(f"Error occurs when searching query '{query}': {e}")
@@ -1450,13 +1370,12 @@ class PostgresRM(dspy.Retrieve):
         if low_score_count > 0:
             logging.warning(
                 f"PostgresRM: {low_score_count}/{len(collected_results)} results "
-                f"have score below min_score threshold ({self.min_score}). "
-                f"Consider using external search as fallback."
+                f"have score below min_score threshold ({self.min_score})."
             )
 
         logging.info(f"PostgresRM: Found {len(collected_results)} results for {len(queries)} queries")
 
-        # return dspy.Prediction(passages=collected_results)
+        # 딕셔너리 리스트를 직접 반환 (YouRM, BingSearch와 동일)
         return collected_results
 
     def close(self):
@@ -1465,71 +1384,234 @@ class PostgresRM(dspy.Retrieve):
             self.connector.close()
 
 
-# PostgresRM 테스트 코드
-if __name__ == "__main__":
-    import sys
-    import toml
+class HybridRM(dspy.Retrieve):
+    """
+    Hybrid Retrieval Model - 내부 DB와 외부 검색을 혼합하는 검색 모듈
 
-    def load_api_key(toml_file_path):
-        """secrets.toml에서 환경변수 로드"""
-        try:
-            with open(toml_file_path, "r") as file:
-                data = toml.load(file)
-            for key, value in data.items():
-                os.environ[key] = str(value)
-        except FileNotFoundError:
-            print(f"File not found: {toml_file_path}", file=sys.stderr)
-        except toml.TomlDecodeError:
-            print(f"Error decoding TOML file: {toml_file_path}", file=sys.stderr)
+    DART 내부 검색(PostgresRM)과 Google 외부 검색(SerperRM)을 조합하여,
+    Fact(과거 데이터)와 Trend(최신 뉴스)를 동시에 확보합니다.
 
-    # secrets.toml 로드
-    secrets_path = "secrets.toml"
-    if os.path.exists(secrets_path):
-        load_api_key(secrets_path)
-        print(f"✓ Loaded secrets from: {secrets_path}")
-    else:
-        print(f"⚠ secrets.toml not found")
-        print("  Please create secrets.toml with PG_HOST, PG_PORT, PG_USER, PG_PASSWORD, PG_DATABASE")
-        sys.exit(1)
+    Architecture Pattern: Composition (조립)
+    - PostgresRM과 SerperRM 인스턴스를 내부적으로 보유
+    - 두 검색 결과를 internal_k:external_k 비율로 혼합
 
-    try:
-        # PostgresRM 초기화
-        print("\n[1] Initializing PostgresRM...")
-        rm = PostgresRM(k=5, min_score=0.5)
-        print("✓ PostgresRM initialized successfully")
+    Default Ratio: Internal(3) : External(7)
+    - 내부 검색: 높은 신뢰도의 DART 보고서 데이터
+    - 외부 검색: 최신 시장 동향 및 뉴스
 
-        # 단일 쿼리 테스트
-        print("\n[2] Testing single query: '삼성전자 재무'")
-        result = rm.forward("삼성전자 재무")
+    Attributes:
+        internal_rm: PostgresRM 인스턴스 (DART 내부 검색)
+        external_rm: SerperRM 인스턴스 (Google 외부 검색)
+        internal_k: 내부 검색 결과 개수 (Default: 3)
+        external_k: 외부 검색 결과 개수 (Default: 7)
+        usage: 검색 호출 횟수 추적
 
-        print(f"✓ Result type: {type(result)}")
-        print(f"✓ Result is dspy.Prediction: {isinstance(result, dspy.Prediction)}")
-        print(f"✓ Number of passages: {len(result.passages)}")
+    Example:
+        >>> internal_rm = PostgresRM(k=10, company_filter="삼성전자")
+        >>> external_rm = SerperRM(serper_search_api_key="xxx", k=10)
+        >>> hybrid_rm = HybridRM(internal_rm, external_rm, internal_k=3, external_k=7)
+        >>> result = hybrid_rm.forward("HBM 시장 전망")
+        >>> # 내부 3개 + 외부 7개 = 총 10개 결과 반환
+    """
 
-        if result.passages:
-            print("\n--- First passage ---")
-            first = result.passages[0]
-            print(f"  Title: {first.get('title', 'N/A')}")
-            print(f"  URL: {first.get('url', 'N/A')}")
-            print(f"  Score: {first.get('score', 'N/A')}")
-            print(f"  Content (first 150 chars): {first.get('content', '')[:150]}...")
+    def __init__(
+        self,
+        internal_rm,
+        external_rm,
+        internal_k: int = 3,
+        external_k: int = 7
+    ):
+        """
+        HybridRM 초기화
 
-        # 다중 쿼리 테스트
-        print("\n[3] Testing multiple queries...")
-        result2 = rm.forward(["삼성전자 매출", "삼성전자 영업이익"])
-        print(f"✓ Multiple queries result: {len(result2.passages)} passages")
+        Args:
+            internal_rm: PostgresRM 인스턴스 (내부 DART 검색)
+            external_rm: SerperRM 인스턴스 (외부 Google 검색)
+            internal_k: 내부 검색 결과 개수 (Default: 3)
+            external_k: 외부 검색 결과 개수 (Default: 7)
 
-        # 사용량 확인
-        usage = rm.get_usage_and_reset()
-        print(f"\n[4] Usage stats: {usage}")
+        Raises:
+            ValueError: internal_rm 또는 external_rm이 None인 경우
+        """
+        if internal_rm is None or external_rm is None:
+            raise ValueError("Both internal_rm and external_rm must be provided")
 
-        # 연결 종료
-        rm.close()
-        print("\n[5] PostgresRM test completed successfully ✓")
+        # dspy.Retrieve 초기화: 전체 k는 internal_k + external_k
+        super().__init__(k=internal_k + external_k)
 
-    except Exception as e:
-        print(f"✗ Error: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        self.internal_rm = internal_rm
+        self.external_rm = external_rm
+        self.internal_k = internal_k
+        self.external_k = external_k
+        self.usage = 0
+
+        logging.info(
+            f"HybridRM initialized with internal_k={internal_k}, external_k={external_k} "
+            f"(Total k={self.k})"
+        )
+
+    def get_usage_and_reset(self):
+        """
+        사용량 조회 및 리셋
+
+        Returns:
+            dict: {"HybridRM": usage_count, "PostgresRM": ..., "SerperRM": ...}
+        """
+        usage = self.usage
+        self.usage = 0
+
+        # 내부/외부 RM의 사용량도 함께 조회
+        internal_usage = self.internal_rm.get_usage_and_reset()
+        external_usage = self.external_rm.get_usage_and_reset()
+
+        return {
+            "HybridRM": usage,
+            **internal_usage,
+            **external_usage
+        }
+
+    def forward(
+        self,
+        query_or_queries: Union[str, List[str]],
+        exclude_urls: List[str] = []
+    ):
+        """
+        하이브리드 검색 수행: 내부 + 외부 결과 혼합
+
+        Process:
+        1. 쿼리 정규화 (str → List[str])
+        2. 각 쿼리별로:
+           a) 내부 검색 (PostgresRM) - Fallback 처리
+           b) 외부 검색 (SerperRM) - Fallback 처리
+           c) 결과 혼합 (중복 제거)
+        3. dspy.Prediction 형태로 반환
+
+        Args:
+            query_or_queries: 검색 쿼리 (단일 문자열 또는 문자열 리스트)
+            exclude_urls: 제외할 URL 리스트 (외부 검색에 전달)
+
+        Returns:
+            dspy.Prediction: passages 필드에 검색 결과 리스트 포함
+                - 각 결과는 {'content', 'title', 'url', 'score', 'source'} 형태
+                - source: 'internal' 또는 'external'
+
+        Note:
+            - 내부/외부 검색 실패 시 에러 로그를 남기고 빈 리스트로 처리
+            - 중복 제거는 URL 기준으로 수행 (외부 우선)
+        """
+        # 쿼리 정규화
+        queries = (
+            [query_or_queries]
+            if isinstance(query_or_queries, str)
+            else query_or_queries
+        )
+
+        self.usage += len(queries)
+        final_results = []
+
+        for query in queries:
+            logging.info(f"[HybridRM] Processing query: {query}")
+
+            # 1. 내부 검색 (DART) - Fallback 처리 필수
+            internal_results = []
+            try:
+                logging.info(f"[HybridRM] Internal search (k={self.internal_k})...")
+                i_res = self.internal_rm.forward(query, exclude_urls=exclude_urls)
+
+                # dspy.Prediction 객체인 경우 passages 추출
+                if hasattr(i_res, 'passages'):
+                    i_res = i_res.passages
+
+                # 리스트가 아닌 경우 리스트로 변환
+                if not isinstance(i_res, list):
+                    i_res = [i_res] if i_res else []
+
+                # internal_k 개수만큼만 가져오기
+                internal_results = i_res[:self.internal_k]
+
+                # source 태그 추가
+                for item in internal_results:
+                    if isinstance(item, dict):
+                        item['source'] = 'internal'
+
+                logging.info(f"[HybridRM] Internal search returned {len(internal_results)} results")
+
+            except Exception as e:
+                logging.error(f"[HybridRM] Internal search error: {e}")
+                internal_results = []
+
+            # 2. 외부 검색 (Serper)
+            external_results = []
+            try:
+                logging.info(f"[HybridRM] External search (k={self.external_k})...")
+                e_res = self.external_rm.forward(query, exclude_urls=exclude_urls)
+
+                # dspy.Prediction 객체인 경우 passages 추출
+                if hasattr(e_res, 'passages'):
+                    e_res = e_res.passages
+
+                # 리스트가 아닌 경우 리스트로 변환
+                if not isinstance(e_res, list):
+                    e_res = [e_res] if e_res else []
+
+                # external_k 개수만큼만 가져오기
+                external_results = e_res[:self.external_k]
+
+                # source 태그 추가
+                for item in external_results:
+                    if isinstance(item, dict):
+                        item['source'] = 'external'
+
+                logging.info(f"[HybridRM] External search returned {len(external_results)} results")
+
+            except Exception as e:
+                logging.error(f"[HybridRM] External search error: {e}")
+                external_results = []
+
+            # 3. 병합 (Merge) - 중복 제거 로직 (URL 기준)
+            seen_urls = set()
+            merged_results = []
+
+            # 내부 결과 먼저 추가 (우선순위)
+            for item in internal_results:
+                if isinstance(item, dict):
+                    url = item.get('url', '')
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        merged_results.append(item)
+                    elif not url:
+                        # URL이 없는 경우도 추가 (DART 청크 등)
+                        merged_results.append(item)
+
+            # 외부 결과 추가
+            for item in external_results:
+                if isinstance(item, dict):
+                    url = item.get('url', '')
+                    if url and url not in seen_urls:
+                        seen_urls.add(url)
+                        merged_results.append(item)
+                    elif not url:
+                        merged_results.append(item)
+
+            final_results.extend(merged_results)
+
+            logging.info(
+                f"[HybridRM] Query '{query}' completed: "
+                f"{len(internal_results)} internal + {len(external_results)} external "
+                f"= {len(merged_results)} total (after dedup)"
+            )
+
+        # 딕셔너리 리스트를 직접 반환 (YouRM, PostgresRM, SerperRM과 동일)
+        logging.info(f"[HybridRM] Total results across all queries: {len(final_results)}")
+        return final_results
+
+    def close(self):
+        """
+        내부/외부 RM의 연결 종료 (있는 경우)
+        """
+        if hasattr(self.internal_rm, 'close'):
+            self.internal_rm.close()
+        if hasattr(self.external_rm, 'close'):
+            self.external_rm.close()
+        logging.info("HybridRM connections closed")
 
