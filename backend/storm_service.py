@@ -459,7 +459,150 @@ def _load_and_save_report_bridge(
     return report_id
 
 
-def _setup_lm_configs(model_provider: str = "openai") -> STORMWikiLMConfigs:
+def _setup_lm_configs(model_provider: str) -> STORMWikiLMConfigs:
+    """
+    LLM 설정을 초기화합니다.
+    
+    Args:
+        model_provider: "openai" 또는 "gemini"
+        
+    Returns:
+        STORMWikiLMConfigs: STORM 엔진용 LM 설정 객체
+    """
+    if model_provider == "gemini":
+        # Google Gemini models
+        conv_simulator_lm = GoogleModel(
+            model="gemini-1.5-flash-002", 
+            max_tokens=500
+        )
+        question_asker_lm = GoogleModel(
+            model="gemini-1.5-flash-002", 
+            max_tokens=500
+        )
+        outline_gen_lm = GoogleModel(
+            model="gemini-1.5-flash-002", 
+            max_tokens=400
+        )
+        article_gen_lm = GoogleModel(
+            model="gemini-1.5-pro-002", 
+            max_tokens=700
+        )
+        article_polish_lm = GoogleModel(
+            model="gemini-1.5-pro-002", 
+            max_tokens=4000
+        )
+    else:
+        # OpenAI models (default)
+        conv_simulator_lm = OpenAIModel(
+            model="gpt-3.5-turbo", 
+            max_tokens=500
+        )
+        question_asker_lm = OpenAIModel(
+            model="gpt-3.5-turbo", 
+            max_tokens=500
+        )
+        outline_gen_lm = OpenAIModel(
+            model="gpt-4o", 
+            max_tokens=400
+        )
+        article_gen_lm = OpenAIModel(
+            model="gpt-4o", 
+            max_tokens=700
+        )
+        article_polish_lm = OpenAIModel(
+            model="gpt-4o", 
+            max_tokens=4000
+        )
+    
+    return STORMWikiLMConfigs(
+        conv_simulator_lm=conv_simulator_lm,
+        question_asker_lm=question_asker_lm,
+        outline_gen_lm=outline_gen_lm,
+        article_gen_lm=article_gen_lm,
+        article_polish_lm=article_polish_lm,
+    )
+
+
+def _initialize_postgres_rm(company_name: str, search_top_k: int = 10, min_score: float = 0.5) -> PostgresRM:
+    """
+    PostgresRM을 초기화하고 company filter를 설정합니다.
+    
+    Args:
+        company_name: 검색 대상 기업명
+        search_top_k: 검색 결과 top-k (default: 10)
+        min_score: 최소 유사도 점수 (default: 0.5)
+        
+    Returns:
+        PostgresRM: 초기화된 PostgresRM 인스턴스
+    """
+    rm = PostgresRM(k=search_top_k, min_score=min_score)
+    rm.set_company_filter(company_name)
+    logger.info(f"✓ PostgresRM initialized with company filter: {company_name}")
+    return rm
+
+
+def _create_engine_arguments(output_dir: str, search_top_k: int, max_thread_num: int) -> STORMWikiRunnerArguments:
+    """
+    STORM 엔진 인자를 생성합니다.
+    
+    Args:
+        output_dir: 출력 디렉토리 경로
+        search_top_k: 검색 top-k
+        max_thread_num: 최대 스레드 수
+        
+    Returns:
+        STORMWikiRunnerArguments: 엔진 설정 객체
+    """
+    engine_args = STORMWikiRunnerArguments(
+        output_dir=output_dir,
+        max_conv_turn=STORM_MAX_CONV_TURN,
+        max_perspective=STORM_MAX_PERSPECTIVE,
+        search_top_k=search_top_k,
+        max_thread_num=max_thread_num,
+    )
+    logger.info(f"✓ Engine arguments configured")
+    return engine_args
+
+
+def _execute_storm_runner(
+    runner: STORMWikiRunner, 
+    topic: str, 
+    max_retries: int = STORM_RUN_MAX_RETRIES
+) -> None:
+    """
+    STORM Runner를 실행합니다 (Rate limit retry 포함).
+    
+    Args:
+        runner: STORMWikiRunner 인스턴스
+        topic: 생성할 주제
+        max_retries: 최대 재시도 횟수
+        
+    Raises:
+        Exception: 모든 재시도 후에도 실패한 경우
+    """
+    for attempt in range(max_retries):
+        try:
+            runner.run(
+                topic=topic,
+                do_research=True,
+                do_generate_outline=True,
+                do_generate_article=True,
+                do_polish_article=True
+            )
+            break
+        except Exception as run_err:
+            is_rate = _is_rate_limit_error(run_err)
+            if is_rate and attempt < max_retries - 1:
+                wait_s = RATE_LIMIT_BASE_WAIT_SECONDS * (attempt + 1)
+                logger.warning(
+                    f"Rate limit detected; retrying in {wait_s}s (attempt {attempt+1}/{max_retries})"
+                )
+                time.sleep(wait_s)
+                continue
+            # Re-raise for outer handler
+            raise
+    
+    logger.info("✓ STORM Runner completed successfully")
     """
     LLM Configuration 설정
     
@@ -609,17 +752,13 @@ def run_storm_pipeline(
         # ============================================================
         # Step 5: PostgresRM 초기화 (내부 DB 검색)
         # ============================================================
-        jobs_dict[job_id]["progress"] = 30
+        jobs_dict[job_id]["progress"] = PROGRESS_AFTER_RM_INIT  # ✅ [REFACTOR] Use constant
         logger.info("Initializing PostgresRM...")
         
-        # MVP 최적화 설정 (속도 우선)
-        search_top_k = 10
-        min_score = 0.5
+        # ✅ [REFACTOR] Use helper function
+        rm = _initialize_postgres_rm(company_name, search_top_k=10, min_score=0.5)
         
-        rm = PostgresRM(k=search_top_k, min_score=min_score)
-        rm.set_company_filter(company_name)
-        
-        logger.info(f"✓ PostgresRM initialized with k={search_top_k}, company_filter={company_name}")
+        logger.info(f"✓ PostgresRM initialized with k=10, company_filter={company_name}")
         
         # ============================================================
         # Step 6: STORM Engine Arguments 설정
@@ -647,15 +786,12 @@ def run_storm_pipeline(
         
         logger.info(f"ℹ️  Thread count set to: {max_thread_num} (Safe limit applied)")
 
-        engine_args = STORMWikiRunnerArguments(
+        # ✅ [REFACTOR] Use helper function
+        engine_args = _create_engine_arguments(
             output_dir=output_dir,
-            max_conv_turn=STORM_MAX_CONV_TURN,         # ✅ [REFACTOR] Use constant
-            max_perspective=STORM_MAX_PERSPECTIVE,       # ✅ [REFACTOR] Use constant
-            search_top_k=search_top_k,
-            max_thread_num=max_thread_num,
+            search_top_k=10,
+            max_thread_num=max_thread_num
         )
-        
-        logger.info(f"✓ Engine arguments configured")
         
         # ============================================================
         # Step 7: STORM Runner 실행 (Long-running process!)
@@ -665,32 +801,8 @@ def run_storm_pipeline(
         
         runner = STORMWikiRunner(engine_args, lm_configs, rm)
         
-        # 실제 생성 실행 (1~2분 소요) with simple rate-limit retry
-        max_run_retries = STORM_RUN_MAX_RETRIES  # ✅ [REFACTOR] Use constant
-        for attempt in range(max_run_retries):
-            try:
-                runner.run(
-                    topic=full_topic_for_llm,
-                    do_research=True,
-                    do_generate_outline=True,
-                    do_generate_article=True,
-                    do_polish_article=True
-                )
-                break
-            except Exception as run_err:
-                is_rate = _is_rate_limit_error(run_err)
-                if is_rate and attempt < max_run_retries - 1:
-                    wait_s = RATE_LIMIT_BASE_WAIT_SECONDS * (attempt + 1)  # ✅ [REFACTOR] Use constant
-                    logger.warning(
-                        f"Rate limit detected; retrying in {wait_s}s (attempt {attempt+1}/{max_run_retries})"
-                    )
-                    time.sleep(wait_s)
-                    continue
-                # Re-raise for outer handler
-                raise
-        
-        jobs_dict[job_id]["progress"] = 80
-        logger.info("✓ STORM Runner completed successfully")
+        # ✅ [REFACTOR] Use helper function with rate-limit retry
+        _execute_storm_runner(runner, full_topic_for_llm)
         
         # ============================================================
         # Step 8: Post-Processing Bridge (FIX-Core-003!)
