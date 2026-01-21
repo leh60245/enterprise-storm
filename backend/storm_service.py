@@ -34,7 +34,6 @@ Updated: 2026-01-17 (Post-Processing Bridge Implementation)
 
 import os
 import sys
-import logging
 import json
 import glob
 import time
@@ -54,18 +53,27 @@ from knowledge_storm.rm import PostgresRM
 from knowledge_storm.utils import load_api_key
 
 from src.common.config import extract_companies_from_query
+from src.common.constants import (
+    STORM_MAX_THREAD_LIMIT,
+    STORM_DEFAULT_THREAD_COUNT,
+    STORM_MAX_CONV_TURN,
+    STORM_MAX_PERSPECTIVE,
+    FILE_OPERATION_MAX_RETRIES,
+    FILE_CHECK_WAIT_SECONDS,
+    STORM_RUN_MAX_RETRIES,
+    RATE_LIMIT_BASE_WAIT_SECONDS,
+    PROGRESS_AFTER_RM_INIT,
+    PROGRESS_STORM_RUNNING,
+    PROGRESS_STORM_COMPLETED,
+)
+from src.common.logger import get_logger
 from backend.database import get_db_cursor, get_db_connection
 from psycopg2.extras import RealDictCursor, Json
 import psycopg2
 import psycopg2.extras
 
-# 로깅 설정
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
-)
-logger = logging.getLogger(__name__)
+# ✅ [REFACTOR] Use centralized logger
+logger = get_logger(__name__)
 
 
 def _is_rate_limit_error(exc: Exception) -> bool:
@@ -127,7 +135,7 @@ def _find_report_file(output_dir: str, max_retries: int = 10) -> str | None:
         
         if not all_txt_files:
             logger.debug(f"  [{attempt+1}/{max_retries}] No .txt files found yet, waiting...")
-            time.sleep(1)
+            time.sleep(FILE_CHECK_WAIT_SECONDS)
             continue
         
         # 2. 우선순위: "article" 또는 "polished" 키워드 포함
@@ -149,7 +157,7 @@ def _find_report_file(output_dir: str, max_retries: int = 10) -> str | None:
             logger.info(f"✓ Found report file: {os.path.basename(target_file)} (attempt {attempt+1})")
             break
         
-        time.sleep(1)
+        time.sleep(FILE_CHECK_WAIT_SECONDS)
     
     # ============================================================
     # 디버깅: 파일을 찾지 못한 경우 폴더 내용 출력
@@ -629,11 +637,11 @@ def run_storm_pipeline(
         # OpenAI Tier 1 한도(30k TPM) 보호를 위해 최대 스레드를 제한
         # ============================================================
         max_thread_num_env = os.getenv("STORM_MAX_THREAD_NUM")
-        default_threads = 3  # 안전한 기본값
+        default_threads = STORM_DEFAULT_THREAD_COUNT  # ✅ [REFACTOR] Use constant
         
         if max_thread_num_env:
-            # 환경 변수가 있어도 5를 넘지 않도록 제한 (안전장치)
-            max_thread_num = min(int(max_thread_num_env), 5)
+            # 환경 변수가 있어도 STORM_MAX_THREAD_LIMIT를 넘지 않도록 제한 (안전장치)
+            max_thread_num = min(int(max_thread_num_env), STORM_MAX_THREAD_LIMIT)
         else:
             max_thread_num = default_threads
         
@@ -641,8 +649,8 @@ def run_storm_pipeline(
 
         engine_args = STORMWikiRunnerArguments(
             output_dir=output_dir,
-            max_conv_turn=3,         # MVP 최적화 (속도)
-            max_perspective=3,       # MVP 최적화
+            max_conv_turn=STORM_MAX_CONV_TURN,         # ✅ [REFACTOR] Use constant
+            max_perspective=STORM_MAX_PERSPECTIVE,       # ✅ [REFACTOR] Use constant
             search_top_k=search_top_k,
             max_thread_num=max_thread_num,
         )
@@ -652,13 +660,13 @@ def run_storm_pipeline(
         # ============================================================
         # Step 7: STORM Runner 실행 (Long-running process!)
         # ============================================================
-        jobs_dict[job_id]["progress"] = 50
+        jobs_dict[job_id]["progress"] = PROGRESS_STORM_RUNNING  # ✅ [REFACTOR] Use constant
         logger.info("Starting STORM Runner...")
         
         runner = STORMWikiRunner(engine_args, lm_configs, rm)
         
         # 실제 생성 실행 (1~2분 소요) with simple rate-limit retry
-        max_run_retries = 2
+        max_run_retries = STORM_RUN_MAX_RETRIES  # ✅ [REFACTOR] Use constant
         for attempt in range(max_run_retries):
             try:
                 runner.run(
@@ -672,7 +680,7 @@ def run_storm_pipeline(
             except Exception as run_err:
                 is_rate = _is_rate_limit_error(run_err)
                 if is_rate and attempt < max_run_retries - 1:
-                    wait_s = 10 * (attempt + 1)
+                    wait_s = RATE_LIMIT_BASE_WAIT_SECONDS * (attempt + 1)  # ✅ [REFACTOR] Use constant
                     logger.warning(
                         f"Rate limit detected; retrying in {wait_s}s (attempt {attempt+1}/{max_run_retries})"
                     )

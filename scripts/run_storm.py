@@ -52,7 +52,7 @@ from psycopg2.extras import Json
 # 프로젝트 루트를 path에 추가
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.common.config import TOPICS
+from src.common.config import TOPICS, DB_CONFIG
 from src.common.db_utils import get_available_companies
 
 from knowledge_storm import (
@@ -333,14 +333,8 @@ def save_report_to_db(ai_query: str, output_dir: str, secrets_path: str, model_n
     # Step 4: DB에 저장
     # ========================================
     try:
-        # DB 접속 정보 로드
-        conn = psycopg2.connect(
-            host=os.getenv("PG_HOST"),
-            port=os.getenv("PG_PORT", "5432"),
-            user=os.getenv("PG_USER"),
-            password=os.getenv("PG_PASSWORD"),
-            database=os.getenv("PG_DATABASE")
-        )
+        # ✅ [REFACTOR] Use centralized DB_CONFIG
+        conn = psycopg2.connect(**DB_CONFIG)
 
         cursor = conn.cursor()
 

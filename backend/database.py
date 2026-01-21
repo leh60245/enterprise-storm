@@ -8,27 +8,13 @@ Task ID: FEAT-DB-001-PostgresIntegration
 - RealDictCursor를 통한 딕셔너리 형식 반환
 """
 
-import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from contextlib import contextmanager
-from dotenv import load_dotenv
 from typing import Dict, Any, List, Optional
 
-# 프로젝트 루트의 .env 파일 로드 (backend/.env)
-load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
-
-# ============================================================
-# Database Connection Configuration
-# ============================================================
-
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "localhost"),
-    "port": int(os.getenv("DB_PORT", "5432")),
-    "database": os.getenv("DB_NAME", "postgres"),
-    "user": os.getenv("DB_USER", "postgres"),
-    "password": os.getenv("DB_PASSWORD", "1234"),
-}
+# ✅ [REFACTOR] Use centralized config from src.common
+from src.common.config import DB_CONFIG
 
 # ✅ 모듈 로드 시 DB에 접근하지 않음 (서버 시작 지연 방지)
 print(f"🔧 DB Config: {DB_CONFIG['host']}:{DB_CONFIG['port']}/{DB_CONFIG['database']}")
