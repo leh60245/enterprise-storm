@@ -234,6 +234,8 @@ def write_run_args_json(run_output_dir: str, *, topic: str, company_id: int, com
 
 def save_report_to_db(ai_query: str, output_dir: str, secrets_path: str, model_name: str, company_id: int, company_name: str, analysis_topic: str) -> bool:
     """
+    ✅ [REFACTOR] Uses centralized DBManager.insert_generated_report()
+    
     STORM 실행 결과를 PostgreSQL의 Generated_Reports 테이블에 적재합니다.
     
     폴더 구조:
@@ -330,38 +332,30 @@ def save_report_to_db(ai_query: str, output_dir: str, secrets_path: str, model_n
     }
 
     # ========================================
-    # Step 4: DB에 저장
+    # Step 4: DB에 저장 (✅ REFACTOR: Use DBManager)
     # ========================================
     try:
-        # ✅ [REFACTOR] Use centralized DB_CONFIG
-        conn = psycopg2.connect(**DB_CONFIG)
-
-        cursor = conn.cursor()
-
-        insert_query = """
-        INSERT INTO "Generated_Reports"
-        (company_name, company_id, topic, report_content, toc_text, references_data, conversation_log, meta_info, model_name)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-
-        cursor.execute(insert_query, (
-            company_name,
-            company_id,
-            analysis_topic,  # 분석 주제 (카테고리)
-            report_content,
-            toc_text,
-            Json(references_data) if references_data else None,
-            Json(conversation_log) if conversation_log else None,
-            Json(meta_info),
-            model_name
-        ))
-
-        conn.commit()
-        cursor.close()
-        conn.close()
-
-        logger.info(f"✓ Report saved to DB: {analysis_topic} (company_id={company_id}, company_name={company_name})")
-        return True
+        from src.ingestion.db_manager import DBManager
+        
+        with DBManager() as db:
+            report_id = db.insert_generated_report(
+                company_name=company_name,
+                topic=analysis_topic,
+                report_content=report_content,
+                toc_text=toc_text,
+                references_data=references_data or {},
+                conversation_log=conversation_log or {},
+                meta_info=meta_info or {},
+                model_name=model_name,
+                company_id=company_id
+            )
+        
+        if report_id:
+            logger.info(f"✓ Report saved to DB: {analysis_topic} (report_id={report_id}, company_id={company_id}, company_name={company_name})")
+            return True
+        else:
+            logger.error(f"✗ Failed to save report to DB (no ID returned)")
+            return False
 
     except Exception as e:
         logger.error(f"✗ Failed to save report to DB: {e}")
