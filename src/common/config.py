@@ -9,9 +9,11 @@ AI와 Ingestion 양쪽에서 사용하는 모든 설정을 중앙 관리합니�
 - AI: OPENAI_API_KEY, GOOGLE_API_KEY, ENCODER_API_TYPE
 - DART: DART_API_KEY
 """
+
 import os
 from enum import Enum
 from pathlib import Path
+
 from dotenv import load_dotenv
 
 # 프로젝트 루트에서 .env 로드
@@ -61,18 +63,15 @@ if ACTIVE_EMBEDDING_PROVIDER not in _ALLOWED_PROVIDERS:
 EMBEDDING_CONFIG = {
     # 활성 프로바이더 (런타임 중 절대 변경 금지!)
     "provider": ACTIVE_EMBEDDING_PROVIDER,
-
     # HuggingFace 설정 (768차원 - 다국어 지원)
     "hf_model": os.getenv(
         "HF_EMBEDDING_MODEL",
-        "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+        "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
     ),
     "hf_dimension": 768,
-
     # OpenAI 설정 (1536차원 - 높은 정확도, 비용 발생)
     "openai_model": os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
     "openai_dimension": 1536,
-
     # 공통 설정
     "batch_size": int(os.getenv("EMBEDDING_BATCH_SIZE", "32")),
     "max_length": int(os.getenv("EMBEDDING_MAX_LENGTH", "512")),
@@ -102,24 +101,22 @@ def validate_embedding_dimension_compatibility():
 AI_CONFIG = {
     # LLM 프로바이더
     "llm_provider": os.getenv("LLM_PROVIDER", "openai"),  # openai, gemini, azure
-
     # API Keys
     "openai_api_key": os.getenv("OPENAI_API_KEY"),
     "google_api_key": os.getenv("GOOGLE_API_KEY"),
     "azure_api_key": os.getenv("AZURE_API_KEY"),
     "azure_api_base": os.getenv("AZURE_API_BASE"),
     "azure_api_version": os.getenv("AZURE_API_VERSION"),
-
+    "serper_api_key": os.getenv("SERPER_API_KEY"),
     # 기본 모델 설정
     "default_model": os.getenv("DEFAULT_LLM_MODEL", "gpt-4o"),
-
     # 검색 설정
     "retrieval_top_k": int(os.getenv("RETRIEVAL_TOP_K", "5")),
     "retrieval_min_score": float(os.getenv("RETRIEVAL_MIN_SCORE", "0.5")),
-
     # Encoder API Type (레거시 호환)
     "encoder_api_type": os.getenv("ENCODER_API_TYPE", "openai"),
 }
+
 
 # =============================================================================
 class JOB_STATUS(Enum):
@@ -132,7 +129,7 @@ class JOB_STATUS(Enum):
 
 # Analysis Topic Configuration (분석 주제 중앙 관리)
 # =============================================================================
-# API v2.1 기준 Topic 정의 (공통 사용)
+# Topic 정의 (공통 사용)
 TOPICS = [
     {
         "id": "T01",
@@ -142,27 +139,27 @@ TOPICS = [
     {
         "id": "T02",
         "label": "최근 3개년 재무제표 및 재무 상태 분석",
-        "value": "최근 3개년 재무제표 및 재무 상태 분석"
+        "value": "최근 3개년 재무제표 및 재무 상태 분석",
     },
     {
         "id": "T03",
         "label": "산업 내 경쟁 우위 및 경쟁사 비교 (SWOT)",
-        "value": "산업 내 경쟁 우위 및 경쟁사 비교"
+        "value": "산업 내 경쟁 우위 및 경쟁사 비교",
     },
     {
         "id": "T04",
         "label": "주요 제품 및 서비스 시장 점유율 분석",
-        "value": "주요 제품 및 서비스 시장 점유율 분석"
+        "value": "주요 제품 및 서비스 시장 점유율 분석",
     },
     {
         "id": "T05",
         "label": "R&D 투자 현황 및 기술 경쟁력",
-        "value": "R&D 투자 현황 및 기술 경쟁력"
+        "value": "R&D 투자 현황 및 기술 경쟁력",
     },
     {
         "id": "T06",
         "label": "ESG (환경, 사회, 지배구조) 평가",
-        "value": "ESG (환경, 사회, 지배구조) 평가"
+        "value": "ESG (환경, 사회, 지배구조) 평가",
     },
     {
         "id": "custom",
@@ -175,10 +172,10 @@ TOPICS = [
 def get_topic_value_by_id(topic_id: str) -> str:
     """
     Topic ID로 value(순수 주제)를 조회합니다.
-    
+
     Args:
         topic_id: TOPICS 리스트의 id 값
-        
+
     Returns:
         해당하는 value (순수 주제 텍스트) 또는 None
     """
@@ -207,7 +204,6 @@ def get_topic_list_for_api():
 # =============================================================================
 DART_CONFIG = {
     "api_key": os.getenv("DART_API_KEY"),
-
     # 보고서 검색 설정
     "search_start_date": os.getenv("DART_SEARCH_START_DATE", "20240101"),
     "report_type_code": "a001",  # 사업보고서
@@ -244,8 +240,6 @@ TARGET_SECTIONS = [
     "사업의 내용",
     "재무에 관한 사항",
 ]
-
-
 
 
 # =============================================================================
@@ -299,12 +293,14 @@ def print_config():
     print(f"   Host: {DB_CONFIG['host']}:{DB_CONFIG['port']}")
     print(f"   Database: {DB_CONFIG['database']}")
     print(f"   User: {DB_CONFIG['user']}")
-    print(f"   Password: {'*' * len(DB_CONFIG['password']) if DB_CONFIG['password'] else 'NOT SET'}")
+    print(
+        f"   Password: {'*' * len(DB_CONFIG['password']) if DB_CONFIG['password'] else 'NOT SET'}"
+    )
 
     print("\n🧠 Embedding:")
     print(f"   Provider: {EMBEDDING_CONFIG['provider']}")
     print(f"   Dimension: {EMBEDDING_CONFIG['dimension']}")
-    if EMBEDDING_CONFIG['provider'] == 'huggingface':
+    if EMBEDDING_CONFIG["provider"] == "huggingface":
         print(f"   Model: {EMBEDDING_CONFIG['hf_model']}")
     else:
         print(f"   Model: {EMBEDDING_CONFIG['openai_model']}")
@@ -323,3 +319,17 @@ def print_config():
 
 if __name__ == "__main__":
     print_config()
+
+
+def get_canonical_company_name(name: str) -> str:
+    """
+    기업명 정규화 헬퍼 함수
+    예: '삼성전자(주)' -> '삼성전자'
+    """
+    if not name:
+        return ""
+
+    # 흔한 접미/접두사 제거
+    clean_name = name.strip()
+    clean_name = clean_name.replace("(주)", "").replace("주식회사", "")
+    return clean_name.strip()

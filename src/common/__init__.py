@@ -7,15 +7,8 @@ AI와 Ingestion 양쪽에서 공유하는 핵심 컴포넌트:
 - embedding: 통합 임베딩 서비스 (OpenAI/HuggingFace)
 - utils: 공통 유틸리티 함수
 """
-from .config import (
-    DB_CONFIG,
-    EMBEDDING_CONFIG,
-    DART_CONFIG,
-    BATCH_CONFIG,
-    AI_CONFIG,
-)
-from .db_connection import DBConnectionFactory, get_db_connection
-from .db_utils import get_available_companies
+
+from .config import AI_CONFIG, BATCH_CONFIG, DART_CONFIG, DB_CONFIG, EMBEDDING_CONFIG
 from .embedding import EmbeddingService
 
 __all__ = [
@@ -24,9 +17,5 @@ __all__ = [
     "DART_CONFIG",
     "BATCH_CONFIG",
     "AI_CONFIG",
-    "DBConnectionFactory",
-    "get_db_connection",
-    "get_available_companies",
     "EmbeddingService",
 ]
-
