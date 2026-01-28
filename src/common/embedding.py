@@ -20,10 +20,10 @@ AI와 Ingestion 양쪽에서 동일한 임베딩 모델을 사용하도록 강�
     service = EmbeddingService(provider="huggingface")
     embeddings = service.embed_texts(["텍스트1", "텍스트2"])
 """
-import os
 import logging
-from typing import List, Union, Optional, Literal
+import os
 from abc import ABC, abstractmethod
+from typing import Literal, Optional
 
 import numpy as np
 
@@ -47,12 +47,12 @@ class BaseEmbedder(ABC):
     """임베딩 생성기 기본 클래스"""
 
     @abstractmethod
-    def embed_text(self, text: str) -> List[float]:
+    def embed_text(self, text: str) -> list[float]:
         """단일 텍스트 임베딩"""
         pass
 
     @abstractmethod
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """배치 텍스트 임베딩"""
         pass
 
@@ -81,7 +81,7 @@ class HuggingFaceEmbedder(BaseEmbedder):
 
         # Lazy import (transformers가 무거우므로)
         import torch
-        from transformers import AutoTokenizer, AutoModel
+        from transformers import AutoModel, AutoTokenizer
 
         # 디바이스 설정
         if device is None:
@@ -122,11 +122,11 @@ class HuggingFaceEmbedder(BaseEmbedder):
             input_mask_expanded.sum(1), min=1e-9
         )
 
-    def embed_text(self, text: str) -> List[float]:
+    def embed_text(self, text: str) -> list[float]:
         """단일 텍스트 임베딩"""
         return self.embed_texts([text])[0]
 
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """배치 텍스트 임베딩"""
         import torch
 
@@ -231,13 +231,13 @@ class OpenAIEmbedder(BaseEmbedder):
         token_usage = response.get("usage", {}).get("total_tokens", 0)
         return text, embedding, token_usage
 
-    def embed_text(self, text: str) -> List[float]:
+    def embed_text(self, text: str) -> list[float]:
         """단일 텍스트 임베딩"""
         _, embedding, tokens = self._get_single_embedding(text)
         self.total_token_usage += tokens
         return embedding
 
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """배치 텍스트 임베딩 (병렬 처리)"""
         from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -289,7 +289,7 @@ class EmbeddingService:
     """
 
     _instance: Optional["EmbeddingService"] = None
-    _embedder: Optional[BaseEmbedder] = None
+    _embedder: BaseEmbedder | None = None
 
     def __new__(cls, provider: str = None, **kwargs):
         """싱글톤 패턴 (동일 provider일 경우)"""
@@ -354,7 +354,7 @@ class EmbeddingService:
         """임베딩 차원"""
         return self._embedder.get_dimension()
 
-    def embed_text(self, text: str) -> List[float]:
+    def embed_text(self, text: str) -> list[float]:
         """
         단일 텍스트 임베딩
 
@@ -366,7 +366,7 @@ class EmbeddingService:
         """
         return self._embedder.embed_text(text)
 
-    def embed_texts(self, texts: List[str]) -> List[List[float]]:
+    def embed_texts(self, texts: list[str]) -> list[list[float]]:
         """
         배치 텍스트 임베딩
 
@@ -378,7 +378,7 @@ class EmbeddingService:
         """
         return self._embedder.embed_texts(texts)
 
-    def embed_to_numpy(self, texts: Union[str, List[str]]) -> np.ndarray:
+    def embed_to_numpy(self, texts: str | list[str]) -> np.ndarray:
         """
         NumPy 배열로 임베딩 반환
 
@@ -410,7 +410,7 @@ def get_embedding_service(provider: str = None) -> EmbeddingService:
     return EmbeddingService(provider=provider)
 
 
-def embed_text(text: str, provider: str = None) -> List[float]:
+def embed_text(text: str, provider: str = None) -> list[float]:
     """
     단일 텍스트 임베딩 (편의 함수)
 
@@ -425,7 +425,7 @@ def embed_text(text: str, provider: str = None) -> List[float]:
     return service.embed_text(text)
 
 
-def embed_texts(texts: List[str], provider: str = None) -> List[List[float]]:
+def embed_texts(texts: list[str], provider: str = None) -> list[list[float]]:
     """
     배치 텍스트 임베딩 (편의 함수)
 
@@ -459,7 +459,7 @@ if __name__ == "__main__":
     for i, (text, emb) in enumerate(zip(test_texts, embeddings)):
         print(f"  [{i+1}] '{text[:30]}...' -> [{len(emb)}D] {emb[:3]}...")
 
-    print(f"\n✅ EmbeddingService test passed!")
+    print("\n✅ EmbeddingService test passed!")
     print(f"   Provider: {service.provider}")
     print(f"   Dimension: {service.dimension}")
 

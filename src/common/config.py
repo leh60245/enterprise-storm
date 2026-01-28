@@ -115,6 +115,7 @@ AI_CONFIG = {
     "retrieval_min_score": float(os.getenv("RETRIEVAL_MIN_SCORE", "0.5")),
     # Encoder API Type (레거시 호환)
     "encoder_api_type": os.getenv("ENCODER_API_TYPE", "openai"),
+    "reranker_model":  "BAAI/bge-reranker-v2-m3"
 }
 
 

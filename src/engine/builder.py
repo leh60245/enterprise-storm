@@ -9,11 +9,12 @@ import os
 # Knowledge STORM Imports
 from knowledge_storm import STORMWikiLMConfigs
 from knowledge_storm.lm import AzureOpenAIModel, GoogleModel, OpenAIModel
-from knowledge_storm.rm import HybridRM, PostgresRM, SerperRM
+from knowledge_storm.rm import SerperRM
 from knowledge_storm.utils import load_api_key
 
 # Configuration
 from src.common.config import AI_CONFIG
+from src.engine.retriever import HybridRM, PostgresRM
 
 logger = logging.getLogger(__name__)
 
@@ -93,17 +94,11 @@ def build_hybrid_rm(
     # 1. Internal RM (Postgres)
     # 초기화 시 DB 연결은 sync engine을 사용하지만, 검색은 빠릅니다.
     internal_rm = PostgresRM(k=top_k, min_score=min_score)
-    # [중요] 특정 기업 데이터만 검색하도록 필터링 (Storm 엔진 지원 시)
-    # PostgresRM 구현에 set_company_filter 메소드가 있다고 가정 (이전 코드 기반)
-    if hasattr(internal_rm, "set_company_filter"):
-        internal_rm.set_company_filter(company_name)
 
     logger.info(f"✓ Internal RM initialized (k={top_k})")
 
     # 2. External RM (Serper)
-    serper_key = AI_CONFIG.get("serper_api_key")
-    if not serper_key:
-        serper_key = load_api_key("SERPER_API_KEY")
+    serper_key = AI_CONFIG.get("serper_api_key") or load_api_key("SERPER_API_KEY")
 
     external_rm = SerperRM(serper_search_api_key=serper_key, k=top_k)
     logger.info(f"✓ External RM initialized (k={top_k})")

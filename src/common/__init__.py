@@ -10,6 +10,7 @@ AI와 Ingestion 양쪽에서 공유하는 핵심 컴포넌트:
 
 from .config import AI_CONFIG, BATCH_CONFIG, DART_CONFIG, DB_CONFIG, EMBEDDING_CONFIG
 from .embedding import EmbeddingService
+from .entity_resolver import CompanyEntityResolver
 
 __all__ = [
     "DB_CONFIG",
@@ -18,4 +19,5 @@ __all__ = [
     "BATCH_CONFIG",
     "AI_CONFIG",
     "EmbeddingService",
+    "CompanyEntityResolver",
 ]

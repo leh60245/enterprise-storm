@@ -6,12 +6,12 @@ Refactored:
 - Ensures each test run creates a unique company name.
 """
 
-import pytest
 import asyncio
-import uuid
 import logging
-from typing import AsyncGenerator
+import uuid
+from collections.abc import AsyncGenerator
 
+import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.database import AsyncDatabaseEngine
@@ -60,13 +60,13 @@ def event_loop():
 async def db_engine():
     """Create a FUNCTION-SCOPED database engine with singleton reset."""
     AsyncDatabaseEngine._instance = None
-    
+
     logger.info("Initializing test database engine (singleton reset)...")
     engine = AsyncDatabaseEngine()
     await engine.initialize(echo=False)
-    
+
     yield engine
-    
+
     logger.info("Disposing test database engine...")
     await engine.dispose()
     AsyncDatabaseEngine._instance = None
@@ -105,17 +105,17 @@ def test_company_data() -> dict:
 async def test_company(db_session: AsyncSession, test_company_data: dict) -> Company:
     """Create a test company in the database."""
     from src.database.repositories import CompanyRepository
-    
+
     repo = CompanyRepository(db_session)
-    
+
     # Check if company already exists (should happen rarely with UUID)
     existing = await repo.get_by_name(test_company_data["company_name"])
     if existing:
         return existing
-    
+
     company = await repo.create(test_company_data)
     await db_session.commit()
-    
+
     return company
 
 
@@ -127,11 +127,11 @@ def cleanup_test_data():
     async def _cleanup(session: AsyncSession, model, **filters):
         from sqlalchemy import delete
         stmt = delete(model).where(
-            *[getattr(model, k).like(v) if "%" in str(v) or "*" in str(v) 
-              else getattr(model, k) == v 
+            *[getattr(model, k).like(v) if "%" in str(v) or "*" in str(v)
+              else getattr(model, k) == v
               for k, v in filters.items()]
         )
         await session.execute(stmt)
         await session.commit()
-    
+
     return _cleanup

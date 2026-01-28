@@ -1,6 +1,6 @@
 import logging
 import os
-from typing import Callable, Union, List
+from collections.abc import Callable
 
 import backoff
 import dspy
@@ -36,7 +36,7 @@ class YouRM(dspy.Retrieve):
         return {"YouRM": usage}
 
     def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
+        self, query_or_queries: str | list[str], exclude_urls: list[str] = []
     ):
         """Search with You.com for self.k top passages for query or queries
 
@@ -126,7 +126,7 @@ class BingSearch(dspy.Retrieve):
         return {"BingSearch": usage}
 
     def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
+        self, query_or_queries: str | list[str], exclude_urls: list[str] = []
     ):
         """Search with Bing for self.k top passages for query or queries
 
@@ -303,7 +303,7 @@ class VectorRM(dspy.Retrieve):
         """
         return self.qdrant.client.count(collection_name=self.collection_name)
 
-    def forward(self, query_or_queries: Union[str, List[str]], exclude_urls: List[str]):
+    def forward(self, query_or_queries: str | list[str], exclude_urls: list[str]):
         """
         Search in your data for self.k top passages for query or queries.
 
@@ -385,7 +385,7 @@ class StanfordOvalArxivRM(dspy.Retrieve):
             )
 
     def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
+        self, query_or_queries: str | list[str], exclude_urls: list[str] = []
     ):
         collected_results = []
         queries = (
@@ -487,7 +487,7 @@ class SerperRM(dspy.Retrieve):
         self.usage = 0
         return {"SerperRM": usage}
 
-    def forward(self, query_or_queries: Union[str, List[str]], exclude_urls: List[str]):
+    def forward(self, query_or_queries: str | list[str], exclude_urls: list[str]):
         """
         Calls the API and searches for the query passed in.
 
@@ -596,7 +596,7 @@ class BraveRM(dspy.Retrieve):
         return {"BraveRM": usage}
 
     def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
+        self, query_or_queries: str | list[str], exclude_urls: list[str] = []
     ):
         """Search with api.search.brave.com for self.k top passages for query or queries
 
@@ -678,7 +678,7 @@ class SearXNG(dspy.Retrieve):
         return {"SearXNG": usage}
 
     def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
+        self, query_or_queries: str | list[str], exclude_urls: list[str] = []
     ):
         """Search with SearxNG for self.k top passages for query or queries
 
@@ -801,7 +801,7 @@ class DuckDuckGoSearchRM(dspy.Retrieve):
         return results
 
     def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
+        self, query_or_queries: str | list[str], exclude_urls: list[str] = []
     ):
         """Search with DuckDuckGoSearch for self.k top passages for query or queries
         Args:
@@ -919,7 +919,7 @@ class TavilySearchRM(dspy.Retrieve):
         return {"TavilySearchRM": usage}
 
     def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
+        self, query_or_queries: str | list[str], exclude_urls: list[str] = []
     ):
         """Search with TavilySearch for self.k top passages for query or queries
         Args:
@@ -1047,7 +1047,7 @@ class GoogleSearch(dspy.Retrieve):
         return {"GoogleSearch": usage}
 
     def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
+        self, query_or_queries: str | list[str], exclude_urls: list[str] = []
     ):
         """Search using Google Custom Search API for self.k top results for query or queries.
 
@@ -1189,7 +1189,7 @@ class AzureAISearch(dspy.Retrieve):
         return {"AzureAISearch": usage}
 
     def forward(
-        self, query_or_queries: Union[str, List[str]], exclude_urls: List[str] = []
+        self, query_or_queries: str | list[str], exclude_urls: list[str] = []
     ):
         """Search with Azure Open AI for self.k top passages for query or queries
 
@@ -1307,8 +1307,8 @@ class PostgresRM(dspy.Retrieve):
 
     def forward(
         self,
-        query_or_queries: Union[str, List[str]],
-        exclude_urls: List[str] = [],
+        query_or_queries: str | list[str],
+        exclude_urls: list[str] = [],
         k: int = None # type: ignore
     ):
         """
@@ -1472,8 +1472,8 @@ class HybridRM(dspy.Retrieve):
 
     def forward(
         self,
-        query_or_queries: Union[str, List[str]],
-        exclude_urls: List[str] = []
+        query_or_queries: str | list[str],
+        exclude_urls: list[str] = []
     ):
         """
         하이브리드 검색 수행: 내부 + 외부 결과 혼합

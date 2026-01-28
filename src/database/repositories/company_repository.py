@@ -32,16 +32,13 @@ Created: 2026-01-21
 Version: 1.0.0
 """
 
-from typing import Optional, List
 import logging
 
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, or_, func, and_
+from sqlalchemy import and_, or_, select
 
 from src.database.models.company import Company
 from src.database.repositories.base_repository import (
     BaseRepository,
-    EntityNotFound,
     DuplicateEntity,
     RepositoryError,
 )
@@ -52,46 +49,46 @@ logger = logging.getLogger(__name__)
 class CompanyRepository(BaseRepository[Company]):
     """
     Repository for Company model with specialized query methods.
-    
+
     Extends BaseRepository with domain-specific operations for managing
     company data. Provides both generic CRUD operations and Company-specific
     query methods.
-    
+
     Model:
         Company - Represents a single company in DART database
-    
+
     Example Usage:
         >>> async with engine.get_session() as session:
         ...     repo = CompanyRepository(session)
-        ...     
+
         ...     # Create new company
         ...     company = await repo.create({
         ...         "company_name": "삼성전자",
         ...         "corp_code": "005930",
         ...         "industry": "Semiconductor"
         ...     })
-        ...     
+
         ...     # Get company by ID
         ...     company = await repo.get_by_id(1)
-        ...     
+
         ...     # Find by corp code (DART lookup)
         ...     company = await repo.get_by_corp_code("005930")
-        ...     
+ 
         ...     # List all active companies
         ...     companies = await repo.list_active()
-        ...     
+
         ...     # Update company
         ...     company = await repo.update(1, {"industry": "Electronics"})
-        ...     
+
         ...     # Delete company
         ...     deleted = await repo.delete(1)
     """
-    
+
     model = Company
-    
+
     # ===== Specialized Query Methods =====
-    
-    async def get_by_corp_code(self, corp_code: str) -> Optional[Company]:
+
+    async def get_by_corp_code(self, corp_code: str) -> Company | None:
         """
         Find company by DART corporation code.
         
@@ -117,7 +114,7 @@ class CompanyRepository(BaseRepository[Company]):
             dart_api = DartAgent()
             reports = await dart_api.get_reports(corp_code=corp_code)
             ```
-        """
+        """  # noqa: W293
         try:
             return await self.get_by_filter(
                 {"corp_code": corp_code},
@@ -126,8 +123,8 @@ class CompanyRepository(BaseRepository[Company]):
         except Exception as e:
             logger.error(f"Error finding company by corp_code {corp_code}: {e}")
             raise RepositoryError(f"Failed to find company by corp_code: {e}") from e
-    
-    async def get_by_stock_code(self, stock_code: str) -> Optional[Company]:
+
+    async def get_by_stock_code(self, stock_code: str) -> Company | None:
         """
         Find company by Korea Exchange stock code.
         
@@ -151,7 +148,7 @@ class CompanyRepository(BaseRepository[Company]):
             - Real-time stock price integration
             - Market capitalization updates
             - Trading volume analysis
-        """
+        """  # noqa: W293
         try:
             return await self.get_by_filter(
                 {"stock_code": stock_code},
@@ -160,8 +157,8 @@ class CompanyRepository(BaseRepository[Company]):
         except Exception as e:
             logger.error(f"Error finding company by stock_code {stock_code}: {e}")
             raise RepositoryError(f"Failed to find company by stock_code: {e}") from e
-    
-    async def get_by_name(self, company_name: str) -> Optional[Company]:
+
+    async def get_by_name(self, company_name: str) -> Company | None:
         """
         Find company by exact name match.
         
@@ -193,13 +190,13 @@ class CompanyRepository(BaseRepository[Company]):
         except Exception as e:
             logger.error(f"Error finding company by name '{company_name}': {e}")
             raise RepositoryError(f"Failed to find company by name: {e}") from e
-    
+
     async def get_active_companies(
         self,
-        limit: Optional[int] = None,
+        limit: int | None = None,
         offset: int = 0,
         order_by: str = "company_name"
-    ) -> List[Company]:
+    ) -> list[Company]:
         """
         Get all actively tracked companies.
         
@@ -234,31 +231,31 @@ class CompanyRepository(BaseRepository[Company]):
         """
         try:
             stmt = select(self.model).where(self.model.active == True)
-            
+
             # Add ordering
             if order_by and hasattr(self.model, order_by):
                 order_col = getattr(self.model, order_by)
                 stmt = stmt.order_by(order_col.asc())
-            
+
             # Add pagination
             if limit:
                 stmt = stmt.limit(limit)
             stmt = stmt.offset(offset)
-            
+
             result = await self.session.execute(stmt)
             companies = result.scalars().all()
             logger.debug(f"Retrieved {len(companies)} active companies")
             return companies
-            
+
         except Exception as e:
             logger.error(f"Error retrieving active companies: {e}")
             raise RepositoryError(f"Failed to retrieve active companies: {e}") from e
-    
+
     async def get_by_industry(
         self,
         industry: str,
         active_only: bool = True
-    ) -> List[Company]:
+    ) -> list[Company]:
         """
         Find companies by industry classification.
         
@@ -291,23 +288,23 @@ class CompanyRepository(BaseRepository[Company]):
             conditions = [self.model.industry == industry]
             if active_only:
                 conditions.append(self.model.active == True)
-            
+
             stmt = select(self.model).where(and_(*conditions))
             result = await self.session.execute(stmt)
             companies = result.scalars().all()
-            
+
             logger.debug(f"Retrieved {len(companies)} companies in industry '{industry}'")
             return companies
-            
+
         except Exception as e:
             logger.error(f"Error retrieving companies by industry '{industry}': {e}")
             raise RepositoryError(f"Failed to retrieve companies by industry: {e}") from e
-    
+
     async def search_companies(
         self,
         query: str,
         limit: int = 10
-    ) -> List[Company]:
+    ) -> list[Company]:
         """
         Search companies by name or corp_code with partial matching.
         
@@ -341,23 +338,23 @@ class CompanyRepository(BaseRepository[Company]):
         """
         try:
             search_term = f"%{query}%"
-            
+
             stmt = select(self.model).where(
                 or_(
                     self.model.company_name.ilike(search_term),
                     self.model.corp_code.like(search_term)
                 )
             ).limit(limit)
-            
+
             result = await self.session.execute(stmt)
             companies = result.scalars().all()
             logger.debug(f"Search for '{query}' returned {len(companies)} results")
             return companies
-            
+
         except Exception as e:
             logger.error(f"Error searching companies for '{query}': {e}")
             raise RepositoryError(f"Failed to search companies: {e}") from e
-    
+
     async def count_active(self) -> int:
         """
         Count all active companies.
@@ -376,9 +373,9 @@ class CompanyRepository(BaseRepository[Company]):
         except Exception as e:
             logger.error("Error counting active companies: {e}")
             raise RepositoryError("Failed to count active companies: {e}") from e
-    
+
     # ===== Override Methods (with Company-specific behavior) =====
-    
+
     async def create(self, obj_in: Company | dict) -> Company:
         """
         Create a new company with validation.
@@ -413,9 +410,9 @@ class CompanyRepository(BaseRepository[Company]):
                     raise DuplicateEntity(
                         f"Company '{company_name}' already exists"
                     )
-            
+
             return await super().create(obj_in)
-            
+
         except DuplicateEntity:
             raise
         except Exception as e:
